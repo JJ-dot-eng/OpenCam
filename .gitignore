@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Updater signing key (keep a backup outside the repo; never commit)
+.signing/

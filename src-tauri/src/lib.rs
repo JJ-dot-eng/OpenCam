@@ -137,6 +137,12 @@ fn take_startup_notice(state: State<AppState>) -> Option<String> {
     state.startup_notice.lock().take()
 }
 
+/// 설치 파일로 설치했는지 (설치 폴더에는 NSIS 제거 프로그램이 함께 있다). 포터블이면 자동 업데이트 대신 알림만 한다.
+#[tauri::command]
+fn is_installed() -> bool {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("uninstall.exe").exists())).unwrap_or(false)
+}
+
 /// 녹화 틀 크기 조절을 시작할 때 부른다. 주 마우스 버튼을 떼면 돋보기가 스스로 닫힌다.
 #[tauri::command]
 fn start_magnifier(window: WebviewWindow, scale: f64) -> CmdResult<()> {
@@ -1476,6 +1482,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, sc, ev| {
@@ -1562,6 +1570,7 @@ pub fn run() {
             resize_mouse_down,
             start_magnifier,
             take_startup_notice,
+            is_installed,
             get_full_capture,
             set_full_capture,
             capture_windows,

@@ -80,6 +80,7 @@ export default function SettingsDialog({ settings, onClose, onSaved }: Props) {
             <p className="hint">%Y 년, %m 월, %d 일, %H 시, %M 분, %S 초</p>
             <Check label="녹화 틀을 항상 위에" checked={s.alwaysOnTop} onChange={(v) => set("alwaysOnTop", v)} />
             <Check label="파일을 지울 때 휴지통으로" checked={s.deleteToRecycleBin} onChange={(v) => set("deleteToRecycleBin", v)} />
+            <Check label="켤 때 새 버전 확인 (GitHub에 접속)" checked={s.checkUpdates} onChange={(v) => set("checkUpdates", v)} />
             <Check
               label="저장하지 않은 녹화·편집 내용을 버릴 때 묻지 않기"
               checked={s.doNotAskDiscardRecording}

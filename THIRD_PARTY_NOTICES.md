@@ -15,7 +15,7 @@ OpenCam은 GPL-3.0-or-later로 배포합니다 ([LICENSE](LICENSE)). 아래 부�
 | [windows](https://github.com/microsoft/windows-rs) | 화면 캡처·창 다루기 | MIT 또는 Apache-2.0 |
 
 그 밖의 Rust·npm 부품은 `src-tauri/Cargo.lock`, `package-lock.json`에 적힌 버전을 씁니다. MIT·Apache-2.0이 대부분이고
-BSD·Zlib·BSL-1.0·Unicode-3.0·MPL-2.0 부품도 있으며, 모두 GPL-3.0과 함께 배포할 수 있는 라이선스입니다.
+BSD·ISC·Zlib·BSL-1.0·Unicode-3.0·MPL-2.0 부품도 있으며, 모두 GPL-3.0과 함께 배포할 수 있는 라이선스입니다.
 
 프로그램에 들어가는 모든 부품의 저작권 표시와 라이선스 전문은 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)에
 모아 두었고, 설치 파일과 포터블 zip에도 함께 들어갑니다. 부품을 바꾸면 `node scripts/third-party-licenses.mjs`로 다시 만듭니다.

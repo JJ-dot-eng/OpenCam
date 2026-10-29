@@ -13,6 +13,8 @@ pub struct Settings {
     pub do_not_ask_discard_recording: bool,
     pub do_not_ask_gif_50fps: bool,
     pub delete_to_recycle_bin: bool,
+    /// 켤 때 GitHub 릴리스에서 새 버전을 확인한다
+    pub check_updates: bool,
 
     // 녹화
     pub fps: u32,
@@ -117,6 +119,7 @@ impl Default for Settings {
             do_not_ask_discard_recording: false,
             do_not_ask_gif_50fps: false,
             delete_to_recycle_bin: true,
+            check_updates: true,
 
             fps: 60,
             capture_cursor: false,

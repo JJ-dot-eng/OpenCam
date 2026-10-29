@@ -22,6 +22,7 @@ export interface Settings {
   doNotAskDiscardRecording: boolean;
   doNotAskGif50fps: boolean;
   deleteToRecycleBin: boolean;
+  checkUpdates: boolean;
 
   fps: number;
   captureCursor: boolean;
@@ -329,6 +330,7 @@ export const api = {
   startMagnifier: (scale: number) => invoke<void>("start_magnifier", { scale }),
   /** 시작할 때 생긴 문제(단축키 등록 실패 등)를 한 번 꺼낸다 */
   takeStartupNotice: () => invoke<string | null>("take_startup_notice"),
+  isInstalled: () => invoke<boolean>("is_installed"),
   getFullCapture: () => invoke<Rect | null>("get_full_capture"),
   setFullCapture: (monitor: Rect | null) => invoke<void>("set_full_capture", { monitor }),
   captureWindows: () => invoke<CaptureWindow[]>("capture_windows"),
