@@ -1,6 +1,6 @@
 [package]
 name = "opencam"
-version = "0.1.1"
+version = "0.1.2"
 description = "OpenCam - screen to GIF recorder and editor"
 authors = ["JJ"]
 license = "GPL-3.0-or-later"

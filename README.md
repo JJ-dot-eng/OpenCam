@@ -1,6 +1,6 @@
 # OpenCam
 
-화면을 녹화해 GIF·WebP·APNG·MP4·WebM으로 저장하고 편집하는 Windows 프로그램입니다. (0.1.1)
+화면을 녹화해 GIF·WebP·APNG·MP4·WebM으로 저장하고 편집하는 Windows 프로그램입니다. (0.1.2)
 
 *Screen recorder and GIF/video editor for Windows. The UI is in Korean.*
 
