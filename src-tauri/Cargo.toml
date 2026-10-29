@@ -23,8 +23,6 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
 arboard = "3"
 gif = "0.13"
 imagequant = "4.4"
@@ -71,7 +69,3 @@ strip = true
 # 녹화·인코딩은 디버그 빌드에서도 빨라야 해서 의존성은 항상 최적화
 [profile.dev.package."*"]
 opt-level = 3
-
-# 필터 같은 픽셀 계산도 개발 빌드에서 너무 느리지 않게
-[profile.dev.package.opencam]
-opt-level = 2

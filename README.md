@@ -26,10 +26,10 @@
 - 설정: `%APPDATA%\OpenCam\settings.json`. 화면 표시용 웹뷰 데이터는 `%LOCALAPPDATA%\org.opencam.app`에 생깁니다.
   포터블 버전도 이 두 곳은 PC에 남으니, 완전히 지우려면 함께 지우세요.
 
-**업데이트**: 켤 때 GitHub 릴리스에서 새 버전이 있는지 확인합니다. 설치 버전은 물어본 뒤 받아서 설치하고 다시 켜며,
-포터블 버전은 새 버전이 나왔다고 알리고 받는 곳만 열어 줍니다. 설정 → 일반의 "켤 때 새 버전 확인"을 끄면 확인하지 않습니다.
+**업데이트**: 켤 때 GitHub 릴리스에서 새 버전이 있는지 확인하고, 있으면 알려 주며 받는 곳을 열어 줍니다.
+받기와 설치는 직접 하면 됩니다(설정은 그대로 남습니다). 설정 → 일반의 "켤 때 새 버전 확인"을 끄면 확인하지 않습니다.
 
-**개인정보**: 위의 새 버전 확인(GitHub에서 버전 정보 파일을 받아 오는 것) 말고는 인터넷에 접속하지 않으며,
+**개인정보**: 위의 새 버전 확인(GitHub에서 최신 버전 번호를 받아 오는 것) 말고는 인터넷에 접속하지 않으며,
 화면이나 사용 기록 등 어떤 정보도 밖으로 보내지 않습니다.
 
 ## 주요 기능
@@ -100,14 +100,13 @@ npm run tauri build    # 설치 파일 만들기 (src-tauri/target/release/bundl
 **릴리스 만들기** (관리자용)
 
 1. `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`의 버전을 올립니다.
-2. 업데이트 서명 열쇠를 넣고 빌드합니다. 열쇠는 저장소에 올리지 않는 `.signing/` 폴더에 두고 따로 백업해 둡니다.
-   열쇠를 잃으면 이미 설치된 OpenCam에 업데이트를 보낼 수 없습니다.
+2. 빌드하고 릴리스 파일을 묶습니다.
    ```
-   TAURI_SIGNING_PRIVATE_KEY=.signing/opencam-updater.key TAURI_SIGNING_PRIVATE_KEY_PASSWORD= npm run tauri build
+   npm run tauri build
    node scripts/package-release.mjs
    ```
-3. `src-tauri/target/release/publish/`의 파일 네 개(설치 파일, 포터블 zip, `SHA256SUMS.txt`, `latest.json`)를
-   `v버전` 태그의 GitHub 릴리스에 올립니다. 설치된 OpenCam은 최신 릴리스의 `latest.json`을 보고 업데이트합니다.
+3. `src-tauri/target/release/publish/`의 파일 세 개(설치 파일, 포터블 zip, `SHA256SUMS.txt`)를 `v버전` 태그의
+   GitHub 릴리스에 올립니다. 켜져 있는 OpenCam은 최신 릴리스의 태그 번호를 보고 새 버전을 알립니다.
 
 ## 라이선스
 

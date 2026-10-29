@@ -158,7 +158,7 @@ export default function Editor() {
   useEffect(() => {
     api.getSettings().then((s) => {
       setSettings(s);
-      if (s.checkUpdates && !import.meta.env.DEV) checkForUpdate(showToast);
+      if (s.checkUpdates && !import.meta.env.DEV) checkForUpdate();
     });
     load();
     // 프로그램을 켜면 편집 창이 먼저 뜨므로, 시작할 때 생긴 문제(단축키 등록 실패 등)는 여기서 알린다
