@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenCam",
+  "version": "0.1.0",
+  "identifier": "org.opencam.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "recorder",
+        "title": "OpenCam",
+        "url": "index.html#recorder",
+        "width": 820,
+        "height": 532,
+        "minWidth": 400,
+        "minHeight": 120,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "resizable": true,
+        "visible": false,
+        "center": true
+      },
+      {
+        "label": "main",
+        "title": "OpenCam 편집",
+        "url": "index.html#editor",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 500,
+        "center": true
+      },
+      {
+        "label": "selector",
+        "title": "OpenCam 영역 선택",
+        "url": "index.html#selector",
+        "width": 800,
+        "height": 600,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "license": "GPL-3.0-or-later",
+    "resources": {
+      "../LICENSE": "LICENSE.txt",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "models/LICENSE-ESPCN.txt": "LICENSE-ESPCN.txt"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

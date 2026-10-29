@@ -1,0 +1,422 @@
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+.rec {
+  --frame: #3b82f6;
+  --bar-bg: #ffffff;
+  --bar-line: #d3d8e0;
+  --bar-fg: #1f2430;
+  --bar-dim: #667085;
+  --btn: #ffffff;
+  --btn-hover: #eef1f5;
+  --rec-red: #e5484d;
+  position: relative;
+  height: 100%;
+  font: 13px/1.2 "Segoe UI", "Malgun Gothic", sans-serif;
+  color: var(--bar-fg);
+  user-select: none;
+}
+
+.rec.recording {
+  --frame: #ef4444;
+}
+
+.rec.paused {
+  --frame: #f59e0b;
+}
+
+.rec.resizing {
+  opacity: 0.55;
+}
+
+.rec-toolbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 2px;
+  box-sizing: border-box;
+  background: var(--bar-bg);
+  border: 1px solid var(--bar-line);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.rec-toolbar.bottom {
+  top: auto;
+  bottom: 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--bar-line);
+  border-radius: 0 0 8px 8px;
+}
+
+.rec-toolbar svg {
+  flex: none;
+  pointer-events: none;
+}
+
+.rec-grip {
+  width: 16px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #98a2b3;
+  cursor: move;
+}
+
+.rec-btn {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--bar-line);
+  border-radius: 7px;
+  background: var(--btn);
+  color: var(--bar-fg);
+  font: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: none;
+  position: relative;
+}
+
+.rec-btn:hover:not(:disabled) {
+  background: var(--btn-hover);
+}
+
+.rec-btn:disabled,
+.rec-btn.disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.rec-btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--bar-dim);
+}
+
+.rec-btn.record {
+  border-color: var(--rec-red);
+  background: var(--rec-red);
+  color: #fff;
+  font-weight: 600;
+  padding: 0 12px;
+}
+
+.rec-btn.record:hover:not(:disabled) {
+  background: #d93c41;
+}
+
+.rec-btn.record .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.rec-btn.record small {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.85;
+}
+
+.rec-btn.record.on {
+  border-color: #b4232a;
+  background: #b4232a;
+}
+
+.rec-btn.on {
+  border-color: #f59e0b;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.rec-btn.icon {
+  width: 30px;
+  padding: 0;
+}
+
+.rec-btn.icon.small {
+  width: 24px;
+  height: 24px;
+}
+
+.rec-btn.close:hover:not(:disabled) {
+  background: #ef4444;
+  color: #fff;
+}
+
+/* ☰ 메뉴: 아이콘 위에 투명한 목록을 겹쳐 누르면 바로 펼쳐지게 */
+.rec-btn.menu select {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.rec-timer {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 6px;
+  letter-spacing: 0.3px;
+}
+
+.rec-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--bar-line);
+  margin: 0 4px;
+  flex: none;
+}
+
+/* 아이콘 + 목록 + ▾ 를 한 칸처럼 */
+.rec-dd {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--bar-line);
+  border-radius: 7px;
+  background: var(--btn);
+  color: var(--bar-fg);
+  position: relative;
+  flex: none;
+}
+
+.rec-dd:hover {
+  background: var(--btn-hover);
+}
+
+.rec-dd select {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0 14px 0 0;
+  margin-right: -14px;
+  appearance: none;
+  cursor: pointer;
+  max-width: 110px;
+}
+
+.rec-dd select:focus {
+  outline: none;
+}
+
+.rec-dd .chev {
+  color: var(--bar-dim);
+}
+
+.rec-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--bar-dim);
+}
+
+.rec-size input {
+  width: 48px;
+  height: 26px;
+  border: 1px solid var(--bar-line);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--bar-fg);
+  text-align: center;
+  font: inherit;
+}
+
+.rec-select {
+  height: 30px;
+  border: 1px solid var(--bar-line);
+  border-radius: 7px;
+  background: var(--btn);
+  color: var(--bar-fg);
+  font: inherit;
+  padding: 0 4px;
+  max-width: 160px;
+}
+
+/* 켜기/끄기 스위치: 숨긴 체크박스 + 그림 */
+.rec-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  color: var(--bar-fg);
+  cursor: pointer;
+  flex: none;
+}
+
+.rec-switch svg {
+  color: var(--bar-dim);
+}
+
+.rec-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.rec-switch i {
+  width: 30px;
+  height: 18px;
+  border-radius: 9px;
+  background: #d3d8e0;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.rec-switch i::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.15s;
+}
+
+.rec-switch input:checked + i {
+  background: #2563eb;
+}
+
+.rec-switch input:checked + i::after {
+  left: 14px;
+}
+
+.rec-info {
+  font-variant-numeric: tabular-nums;
+  color: var(--bar-dim);
+  padding: 0 6px;
+}
+
+.rec-mid {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  flex: 0 1 auto;
+}
+
+.rec-spacer {
+  flex: 1;
+  min-width: 8px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.rec-notice {
+  position: absolute;
+  left: 84px;
+  right: 6px;
+  top: 4px;
+  bottom: 4px;
+  line-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(17, 24, 39, 0.96);
+  color: #fcd34d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rec-frame {
+  position: absolute;
+  box-sizing: border-box;
+  border-style: solid;
+  border-color: var(--frame);
+}
+
+/* 테두리(두께 --b) 위에 겹쳐서 잡는 곳. 구멍 안쪽은 창이 잘려 있어 잡을 수 없다. */
+.grip {
+  position: absolute;
+}
+
+.grip.n,
+.grip.s {
+  left: 0;
+  right: 0;
+  height: var(--b);
+  cursor: ns-resize;
+}
+
+.grip.n {
+  top: calc(-1 * var(--b));
+}
+
+.grip.s {
+  bottom: calc(-1 * var(--b));
+}
+
+.grip.e,
+.grip.w {
+  top: 0;
+  bottom: 0;
+  width: var(--b);
+  cursor: ew-resize;
+}
+
+.grip.e {
+  right: calc(-1 * var(--b));
+}
+
+.grip.w {
+  left: calc(-1 * var(--b));
+}
+
+.grip.ne,
+.grip.nw,
+.grip.se,
+.grip.sw {
+  width: calc(var(--b) * 3);
+  height: calc(var(--b) * 3);
+  z-index: 1;
+}
+
+.grip.ne {
+  top: calc(-1 * var(--b));
+  right: calc(-1 * var(--b));
+  cursor: nesw-resize;
+}
+
+.grip.sw {
+  bottom: calc(-1 * var(--b));
+  left: calc(-1 * var(--b));
+  cursor: nesw-resize;
+}
+
+.grip.nw {
+  top: calc(-1 * var(--b));
+  left: calc(-1 * var(--b));
+  cursor: nwse-resize;
+}
+
+.grip.se {
+  bottom: calc(-1 * var(--b));
+  right: calc(-1 * var(--b));
+  cursor: nwse-resize;
+}

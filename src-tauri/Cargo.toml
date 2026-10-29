@@ -1,0 +1,75 @@
+[package]
+name = "opencam"
+version = "0.1.0"
+description = "OpenCam - screen to GIF recorder and editor"
+authors = ["JJ"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/JJ-dot-eng/OpenCam"
+edition = "2024"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "opencam_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+arboard = "3"
+gif = "0.13"
+imagequant = "4.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+parking_lot = "0.12"
+rayon = "1"
+lz4_flex = "0.11"
+png = "0.18"
+webp-animation = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "webp", "bmp"] }
+fast_image_resize = "6"
+half = "2"
+dirs = "6"
+chrono = "0.4"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_System_Threading",
+  "Win32_Media",
+  "Win32_Graphics_Dwm",
+  "Win32_UI_Shell",
+]
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+# 녹화·인코딩은 디버그 빌드에서도 빨라야 해서 의존성은 항상 최적화
+[profile.dev.package."*"]
+opt-level = 3
+
+# 필터 같은 픽셀 계산도 개발 빌드에서 너무 느리지 않게
+[profile.dev.package.opencam]
+opt-level = 2
