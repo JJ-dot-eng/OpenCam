@@ -63,6 +63,7 @@
     "resources": {
       "../LICENSE": "LICENSE.txt",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt",
       "models/LICENSE-ESPCN.txt": "LICENSE-ESPCN.txt"
     },
     "icon": [

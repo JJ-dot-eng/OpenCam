@@ -20,6 +20,14 @@
 **처음 실행할 때 "Windows의 PC 보호" 창이 뜹니다.** 코드 서명을 하지 않은 프로그램이라서입니다.
 "추가 정보 → 실행"을 누르면 됩니다.
 
+**저장 위치**
+
+- 저장한 GIF·영상: 기본 `사진\OpenCam` 폴더 (설정에서 바꿀 수 있음)
+- 설정: `%APPDATA%\OpenCam\settings.json`. 화면 표시용 웹뷰 데이터는 `%LOCALAPPDATA%\org.opencam.app`에 생깁니다.
+  포터블 버전도 이 두 곳은 PC에 남으니, 완전히 지우려면 함께 지우세요.
+
+**개인정보**: OpenCam은 인터넷에 접속하지 않고, 화면이나 사용 기록 등 어떤 정보도 밖으로 보내지 않습니다.
+
 ## 주요 기능
 
 - **녹화**: 가운데가 뚫린 녹화 틀로 영역 지정, 창 찾아 맞추기, 영역 드래그 선택, 모니터 전체 화면, FPS·커서 녹화 설정,
@@ -32,17 +40,38 @@
 
 ## 단축키
 
+**녹화 틀**
+
 | 키 | 하는 일 |
 |---|---|
 | F2 | 녹화 / 정지 (녹화 틀이 떠 있을 때, 설정에서 바꿀 수 있음) |
 | F3 | 일시정지 |
+| Ctrl+S | 녹화 중 지금 화면을 PNG로 저장 |
+| Ctrl+Shift+F | 녹화할 창 찾아 맞추기 |
+| Ctrl+Shift+D | 영역 드래그로 선택 |
+| 방향키 | 녹화 틀 옮기기 (누르고 있으면 빨라짐) |
+| Ctrl+Shift+1~4 / Ctrl+1~4 | 녹화 틀 위치 저장 / 불러오기 |
+
+F2·F3는 OpenCam이 켜져 있는 동안 다른 프로그램보다 먼저 받습니다(예: 탐색기의 F2 이름 바꾸기). 불편하면 설정에서 바꾸세요.
+
+**편집 창**
+
+| 키 | 하는 일 |
+|---|---|
 | Space | 미리보기 재생 / 정지 |
+| ← / → , Home / End | 이전·다음·처음·끝 프레임 (Shift를 같이 누르면 범위 선택) |
+| Alt+← / Alt+→ | 선택한 프레임을 앞·뒤로 옮기기 |
+| Delete | 선택한 프레임 지우기 |
+| Ctrl+A / Esc | 모두 선택 / 선택 해제 |
+| Ctrl+C / Ctrl+X / Ctrl+V | 프레임 복사 / 잘라내기 / 붙여넣기 |
 | Ctrl+Z | 되돌리기 |
 | Ctrl+S | 저장 |
 | Ctrl+O | 파일 열기 |
+| Ctrl+Shift+E | 프레임을 이미지로 내보내기 |
 | Ctrl+휠 | 미리보기 확대 / 축소 |
-
-F2·F3는 OpenCam이 켜져 있는 동안 다른 프로그램보다 먼저 받습니다(예: 탐색기의 F2 이름 바꾸기). 불편하면 설정에서 바꾸세요.
+| C · F · D · B | 자르기 · 필터 · 그리기 · 삽입(텍스트·이미지·스티커) |
+| Q · X · R | 프레임 지우기(홀수·짝수·비슷한 프레임) · 구간만 남기기 · 크기·회전 |
+| T · S · G | 화면 전환 · 영상 요약 · 콜라주 |
 
 ## MP4·WebM·AVIF 저장
 
@@ -66,4 +95,7 @@ npm run tauri build    # 설치 파일 만들기 (src-tauri/target/release/bundl
 
 ## 라이선스
 
-[GPL-3.0-or-later](LICENSE). 함께 쓰는 부품과 그 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다.
+Copyright (C) 2026 JJ
+
+[GPL-3.0-or-later](LICENSE). 함께 쓰는 부품과 그 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에,
+각 부품의 저작권 표시와 라이선스 전문은 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)에 있습니다.
