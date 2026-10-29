@@ -1,11 +1,14 @@
 // 설정 창.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, bgrToHex, errText, hexToBgr, Settings } from "./api";
 import { Check, Modal, NumField } from "./dialogs";
 import { alertAsk } from "./ask";
+import { checkForUpdate, REPO_URL } from "./updater";
 
-const TABS = ["일반", "녹화", "편집", "GIF", "WebP", "APNG", "동영상", "단축키"] as const;
+const TABS = ["일반", "녹화", "편집", "GIF", "WebP", "APNG", "동영상", "단축키", "정보"] as const;
 type Tab = (typeof TABS)[number];
 
 interface Props {
@@ -18,6 +21,12 @@ export default function SettingsDialog({ settings, onClose, onSaved }: Props) {
   const [s, setS] = useState<Settings>(settings);
   const [tab, setTab] = useState<Tab>("일반");
   const [error, setError] = useState<string | null>(null);
+  const [version, setVersion] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  useEffect(() => {
+    getVersion().then(setVersion);
+  }, []);
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS((cur) => ({ ...cur, [k]: v }));
   const num = (k: keyof Settings, lo: number, hi: number) => (v: number) =>
@@ -334,6 +343,27 @@ export default function SettingsDialog({ settings, onClose, onSaved }: Props) {
             <Check label="Ctrl+PrtSc로 녹화 / 정지" checked={s.hotkeyCtrlPrtsc} onChange={(v) => set("hotkeyCtrlPrtsc", v)} />
             <p className="hint">켜면 Ctrl+PrtSc가 다른 프로그램 대신 OpenCam에 전달될 수 있습니다.</p>
             <p className="hint">예: F2, Ctrl+Shift+R, Alt+F9. 비워 두면 단축키를 쓰지 않습니다.</p>
+          </>
+        )}
+        {tab === "정보" && (
+          <>
+            <h3>OpenCam {version}</h3>
+            <p>화면 녹화·GIF 편집 프로그램</p>
+            <p className="hint">Copyright (C) 2026 JJ · GPL-3.0-or-later</p>
+            <p className="hint">함께 쓰는 부품의 라이선스는 설치 폴더의 THIRD_PARTY_LICENSES.txt에 있습니다.</p>
+            <div className="row">
+              <button
+                disabled={checking}
+                onClick={async () => {
+                  setChecking(true);
+                  await checkForUpdate(true);
+                  setChecking(false);
+                }}
+              >
+                {checking ? "확인하는 중…" : "새 버전 확인"}
+              </button>
+              <button onClick={() => openUrl(REPO_URL)}>GitHub 페이지</button>
+            </div>
           </>
         )}
       </div>
