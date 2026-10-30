@@ -742,9 +742,8 @@ impl Mp4Stream {
     }
 }
 
-/// 투명한 부분을 배경색(BGR) 위에 합성한다 (MP4는 투명을 지원하지 않는다)
-fn composite_over(px: &mut [u8], c: [u8; 3]) {
-    let rgb = [c[2], c[1], c[0]];
+/// 투명한 부분을 배경색(RGB, `bgr()`로 바꾼 값) 위에 합성한다 (MP4는 투명을 지원하지 않는다)
+fn composite_over(px: &mut [u8], rgb: [u8; 3]) {
     for p in px.chunks_exact_mut(4) {
         let a = p[3] as u32;
         if a == 255 {
@@ -875,6 +874,14 @@ mod tests {
         let px = out[1].rgba();
         let last_row = (7 * 8) * 4;
         assert_eq!(&px[last_row..last_row + 3], &[255, 0, 0]);
+    }
+
+    #[test]
+    fn transparent_matte_keeps_red_and_blue() {
+        // 설정의 색은 BGR 정수: 0x0000ff = 빨강. 예전에는 파랑으로 합성됐다.
+        let mut px = vec![0, 0, 0, 0, 10, 20, 30, 255];
+        composite_over(&mut px, bgr(0x0000ff));
+        assert_eq!(px, vec![255, 0, 0, 255, 10, 20, 30, 255]);
     }
 
     #[test]
