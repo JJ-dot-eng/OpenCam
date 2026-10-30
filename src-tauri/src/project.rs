@@ -100,6 +100,15 @@ impl Project {
         self.frames.iter().find(|f| f.id == id)
     }
 
+    /// 되돌리기 사용을 켜고 끈다. 끄면 쌓아 둔 기록은 버린다 (메모리를 돌려받고, 끈 뒤의 편집을 건너뛰어 되돌리지 않게).
+    pub fn set_undo_enabled(&mut self, on: bool) {
+        self.undo_enabled = on;
+        if !on {
+            self.undo.clear();
+            self.redo.clear();
+        }
+    }
+
     /// 편집하기 직전에 부른다
     fn checkpoint(&mut self) {
         if self.undo_enabled {
@@ -926,6 +935,31 @@ mod tests {
         p.dirty = false;
         assert!(!p.redo());
         assert!(!p.dirty);
+    }
+
+    #[test]
+    fn turning_undo_off_drops_history() {
+        // 편집 중에 되돌리기를 끄면 예전 기록을 버려 메모리를 돌려받고,
+        // Ctrl+Z가 끈 뒤의 편집을 건너뛰어 옛 상태로 돌아가지 않게 한다
+        let mut p = Project { undo_enabled: true, ..Default::default() };
+        p.load((0..4).map(|i| solid(64, 64, i, 10)).collect());
+        // 픽셀을 바꾸는 편집 두 번: 가운데 상태는 기록에만 있는 픽셀이다
+        p.rotate(Rotate::Half);
+        p.rotate(Rotate::Half);
+        p.delete(&[0]);
+        assert!(p.undo());
+        let with_history = p.memory_bytes();
+        p.set_undo_enabled(false);
+        assert!(!p.can_undo() && !p.can_redo());
+        assert!(p.memory_bytes() < with_history);
+        p.delete(&[0]);
+        assert!(!p.undo());
+        assert_eq!(p.frames.len(), 3);
+        // 다시 켜면 그때부터 기록한다
+        p.set_undo_enabled(true);
+        p.delete(&[0]);
+        assert!(p.undo());
+        assert_eq!(p.frames.len(), 3);
     }
 
     #[test]

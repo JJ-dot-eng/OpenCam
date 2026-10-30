@@ -426,7 +426,7 @@ fn finish_recording(app: &AppHandle) {
     }
     {
         let mut p = state.project.lock();
-        p.undo_enabled = state.settings.lock().enable_undo;
+        p.set_undo_enabled(state.settings.lock().enable_undo);
         p.load(frames);
         // 녹화는 아직 어디에도 저장되지 않았다 (버릴 때 묻기 위해). 바로 저장했으면 이미 저장됨.
         p.dirty = !direct_saved;
@@ -554,7 +554,7 @@ fn get_settings(state: State<AppState>) -> Settings {
 #[tauri::command]
 fn set_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> CmdResult<()> {
     settings::save(&settings).map_err(err)?;
-    state.project.lock().undo_enabled = settings.enable_undo;
+    state.project.lock().set_undo_enabled(settings.enable_undo);
     let on_top = settings.always_on_top;
     *state.settings.lock() = settings;
     if let Ok(r) = recorder_window(&app) {
@@ -1347,7 +1347,7 @@ fn start_editing(app: &AppHandle, loaded: import::Loaded, unsaved: bool) -> Proj
     let state = app.state::<AppState>();
     let v = {
         let mut p = state.project.lock();
-        p.undo_enabled = state.settings.lock().enable_undo;
+        p.set_undo_enabled(state.settings.lock().enable_undo);
         p.load(loaded.frames);
         p.dirty = unsaved;
         view(&p, Some(vec![]), loaded.warning)
