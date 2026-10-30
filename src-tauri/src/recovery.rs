@@ -19,6 +19,9 @@ const KEEP: usize = 3;
 #[serde(rename_all = "camelCase")]
 struct Manifest {
     app_version: String,
+    /// 픽셀 파일 이름 앞의 실행 이름 (0.1.4에는 없음)
+    #[serde(default)]
+    session: String,
     /// 마지막으로 저장한 시각 (Unix ms)
     saved_at: i64,
     frames: Vec<FrameEntry>,
@@ -27,7 +30,7 @@ struct Manifest {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameEntry {
-    /// `frames/<file>.lz4`
+    /// `frames/<session>-<file>.lz4`
     file: u64,
     width: u32,
     height: u32,
@@ -44,6 +47,18 @@ pub struct Entry {
     pub width: u32,
     pub height: u32,
     pub total_ms: u64,
+}
+
+/// 이번 실행의 이름. 픽셀 파일 이름 앞에 붙인다. 프레임 번호는 켤 때마다 1부터라서,
+/// 지난 실행에서 지우지 못한 같은 번호 파일을 이번 프레임으로 잘못 쓰지 않게 한다.
+fn session() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| format!("{}-{}", std::process::id(), chrono::Local::now().timestamp_millis()))
+}
+
+/// 픽셀 파일 이름(확장자 빼고). 0.1.4가 저장한 작업은 실행 이름 없이 프레임 번호뿐이다.
+fn frame_stem(session: &str, id: u64) -> String {
+    if session.is_empty() { id.to_string() } else { format!("{session}-{id}") }
 }
 
 pub fn root() -> PathBuf {
@@ -68,7 +83,7 @@ pub fn save(dir: &Path, frames: &[Frame], stop: &AtomicBool) -> Result<()> {
         }
         return Err(e);
     }
-    let used: HashSet<String> = frames.iter().map(|f| format!("{}.lz4", f.id)).collect();
+    let used: HashSet<String> = frames.iter().map(|f| format!("{}.lz4", frame_stem(session(), f.id))).collect();
     for e in std::fs::read_dir(&fdir)?.flatten() {
         if !used.contains(&*e.file_name().to_string_lossy()) {
             let _ = std::fs::remove_file(e.path());
@@ -83,7 +98,7 @@ fn pending_bytes(dir: &Path, frames: &[Frame]) -> u64 {
     let mut seen = HashSet::new();
     frames
         .iter()
-        .filter(|f| seen.insert(f.id) && !fdir.join(format!("{}.lz4", f.id)).exists())
+        .filter(|f| seen.insert(f.id) && !fdir.join(format!("{}.lz4", frame_stem(session(), f.id))).exists())
         .map(|f| f.packed_bytes() as u64)
         .sum()
 }
@@ -110,9 +125,10 @@ fn write_frames(
         if stop.load(Ordering::SeqCst) {
             bail!("자동 저장을 멈췄습니다");
         }
-        let path = fdir.join(format!("{}.lz4", f.id));
+        let stem = frame_stem(session(), f.id);
+        let path = fdir.join(format!("{stem}.lz4"));
         if !path.exists() {
-            let tmp = fdir.join(format!("{}.tmp", f.id));
+            let tmp = fdir.join(format!("{stem}.tmp"));
             written.push(tmp.clone());
             std::fs::write(&tmp, f.packed())?;
             written.push(path.clone());
@@ -121,6 +137,7 @@ fn write_frames(
     }
     let m = Manifest {
         app_version: env!("CARGO_PKG_VERSION").into(),
+        session: session().into(),
         saved_at: chrono::Local::now().timestamp_millis(),
         frames: frames
             .iter()
@@ -152,8 +169,13 @@ pub fn adopt_leftover(root: &Path) {
                 to = root.join(format!("{name}-{n}"));
                 n += 1;
             }
+            // 옮기지 못하면(안의 파일을 다른 프로그램이 열고 있음 등) 복사해 둔다. 복구할 작업을 지우지 않는다.
             if std::fs::rename(&cur, &to).is_err() {
-                clear(&cur);
+                if copy_entry(&cur, &to).is_ok() {
+                    clear(&cur);
+                } else {
+                    clear(&to);
+                }
             }
         }
         _ => clear(&cur),
@@ -162,6 +184,18 @@ pub fn adopt_leftover(root: &Path) {
     for old in all.split_off(KEEP.min(all.len())) {
         clear(&root.join(old.id));
     }
+}
+
+/// 작업 폴더를 복사한다. 목록 파일은 맨 나중에 복사해서, 도중에 실패한 폴더는 복구 목록에 나오지 않는다.
+fn copy_entry(from: &Path, to: &Path) -> Result<()> {
+    let fdir = to.join("frames");
+    std::fs::create_dir_all(&fdir)?;
+    for e in std::fs::read_dir(from.join("frames"))? {
+        let e = e?;
+        std::fs::copy(e.path(), fdir.join(e.file_name()))?;
+    }
+    std::fs::copy(from.join(MANIFEST), to.join(MANIFEST))?;
+    Ok(())
 }
 
 /// 복구할 수 있는 작업들 (최근 것부터)
@@ -202,7 +236,7 @@ pub fn load(dir: &Path) -> Result<Vec<Frame>> {
     m.frames
         .par_iter()
         .map(|e| {
-            let data = std::fs::read(fdir.join(format!("{}.lz4", e.file)))
+            let data = std::fs::read(fdir.join(format!("{}.lz4", frame_stem(&m.session, e.file))))
                 .with_context(|| format!("프레임 파일이 없습니다 ({})", e.file))?;
             Frame::from_packed(e.width, e.height, e.delay_ms, data)
                 .with_context(|| format!("프레임 파일이 깨졌습니다 ({})", e.file))
@@ -214,7 +248,7 @@ pub fn load(dir: &Path) -> Result<Vec<Frame>> {
 pub fn first_frame(dir: &Path) -> Result<Frame> {
     let m = read_manifest(dir)?;
     let e = m.frames.first().context("프레임이 없습니다")?;
-    let data = std::fs::read(dir.join("frames").join(format!("{}.lz4", e.file)))?;
+    let data = std::fs::read(dir.join("frames").join(format!("{}.lz4", frame_stem(&m.session, e.file))))?;
     Frame::from_packed(e.width, e.height, e.delay_ms, data).context("프레임 파일이 깨졌습니다")
 }
 
@@ -244,6 +278,10 @@ mod tests {
 
     fn frame(v: u8, delay: u32) -> Frame {
         Frame::from_rgba(2, 1, &[v, 0, 0, 255, v, 0, 0, 255], delay)
+    }
+
+    fn file_of(dir: &Path, f: &Frame) -> PathBuf {
+        dir.join("frames").join(format!("{}.lz4", frame_stem(session(), f.id)))
     }
 
     fn temp_root(name: &str) -> PathBuf {
@@ -297,14 +335,64 @@ mod tests {
     }
 
     #[test]
+    fn files_left_by_an_earlier_run_are_not_taken_for_new_frames() {
+        // 프레임 번호는 켤 때마다 1부터라, 지난 실행에서 지우지 못한 같은 번호 파일이 있을 수 있다.
+        // 그 파일을 이번 프레임으로 잘못 쓰면 복구할 때 옛 그림이 나온다.
+        let root = temp_root("stale");
+        let cur = current(&root);
+        let a = frame(10, 100);
+        std::fs::create_dir_all(cur.join("frames")).unwrap();
+        std::fs::write(cur.join("frames").join(format!("{}.lz4", a.id)), frame(200, 100).packed()).unwrap();
+        save(&cur, std::slice::from_ref(&a), &GO).unwrap();
+        assert_eq!(load(&cur).unwrap()[0].rgba()[0], 10);
+        // 남은 옛 파일은 저장하면서 정리한다
+        assert_eq!(std::fs::read_dir(cur.join("frames")).unwrap().count(), 1);
+        clear(&root);
+    }
+
+    #[test]
+    fn work_saved_by_0_1_4_still_loads() {
+        // 0.1.4는 목록에 session이 없고 픽셀 파일 이름이 프레임 번호뿐이었다
+        let root = temp_root("old");
+        let cur = current(&root);
+        let a = frame(7, 100);
+        save(&cur, std::slice::from_ref(&a), &GO).unwrap();
+        let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(cur.join(MANIFEST)).unwrap()).unwrap();
+        m.as_object_mut().unwrap().remove("session");
+        std::fs::write(cur.join(MANIFEST), serde_json::to_vec(&m).unwrap()).unwrap();
+        std::fs::rename(file_of(&cur, &a), cur.join("frames").join(format!("{}.lz4", a.id))).unwrap();
+        assert_eq!(load(&cur).unwrap()[0].rgba()[0], 7);
+        assert_eq!(first_frame(&cur).unwrap().rgba()[0], 7);
+        clear(&root);
+    }
+
+    #[test]
+    fn leftover_is_kept_even_if_it_cannot_be_moved() {
+        // 켤 때 남은 작업 폴더를 옮기지 못하면(안의 파일을 다른 프로그램이 열고 있음 등) 지우지 말고 복사해 둔다
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_root("locked");
+        let cur = current(&root);
+        let a = frame(3, 100);
+        save(&cur, std::slice::from_ref(&a), &GO).unwrap();
+        // 읽기만 함께 쓰게 열어 두면 폴더를 옮길 수 없다
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(file_of(&cur, &a)).unwrap();
+        adopt_leftover(&root);
+        let entries = list(&root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(load(&entry_dir(&root, &entries[0].id).unwrap()).unwrap()[0].rgba()[0], 3);
+        drop(held);
+        clear(&root);
+    }
+
+    #[test]
     fn corrupted_or_missing_frames_are_errors_not_crashes() {
         let root = temp_root("corrupt");
         let cur = current(&root);
         let a = frame(1, 10);
         save(&cur, &[a.clone()], &GO).unwrap();
-        std::fs::write(cur.join("frames").join(format!("{}.lz4", a.id)), b"garbage").unwrap();
+        std::fs::write(file_of(&cur, &a), b"garbage").unwrap();
         assert!(load(&cur).is_err());
-        std::fs::remove_file(cur.join("frames").join(format!("{}.lz4", a.id))).unwrap();
+        std::fs::remove_file(file_of(&cur, &a)).unwrap();
         assert!(load(&cur).is_err());
         clear(&root);
     }
@@ -317,10 +405,10 @@ mod tests {
         let (old, a, b) = (frame(1, 10), frame(2, 10), frame(3, 10));
         save(&cur, std::slice::from_ref(&old), &GO).unwrap();
         // b를 쓸 자리에 폴더를 만들어 두어 쓰기가 실패하게 한다
-        std::fs::create_dir_all(cur.join("frames").join(format!("{}.tmp", b.id))).unwrap();
+        std::fs::create_dir_all(cur.join("frames").join(format!("{}.tmp", frame_stem(session(), b.id)))).unwrap();
         assert!(save(&cur, &[old.clone(), a.clone(), b.clone()], &GO).is_err());
-        assert!(!cur.join("frames").join(format!("{}.lz4", a.id)).exists());
-        assert!(cur.join("frames").join(format!("{}.lz4", old.id)).exists());
+        assert!(!file_of(&cur, &a).exists());
+        assert!(file_of(&cur, &old).exists());
         assert_eq!(load(&cur).unwrap().len(), 1);
         clear(&root);
     }
@@ -335,7 +423,7 @@ mod tests {
         let new: Vec<Frame> = (2..50).map(|v| frame(v, 10)).collect();
         let stop = AtomicBool::new(true);
         assert!(save(&cur, &[vec![old.clone()], new.clone()].concat(), &stop).is_err());
-        assert!(new.iter().all(|f| !cur.join("frames").join(format!("{}.lz4", f.id)).exists()));
+        assert!(new.iter().all(|f| !file_of(&cur, f).exists()));
         assert_eq!(load(&cur).unwrap().len(), 1);
         clear(&root);
     }
