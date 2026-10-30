@@ -180,12 +180,18 @@ pub fn export(frames: &[Frame], path: &Path, opt: &ExportOptions, s: &Settings, 
     }
 }
 
-/// 저장하지 않고 예상 크기만 계산 (임시 파일에 써 보고 지운다)
+/// 저장하지 않고 예상 크기만 계산 (임시 폴더에 써 보고 지운다).
+/// 계산마다 따로 폴더를 써서 겹쳐 계산해도 섞이지 않고, PNG 연속 이미지는 모든 장을 더한다.
 pub fn estimate_size(frames: &[Frame], opt: &ExportOptions, s: &Settings) -> Result<u64> {
-    let tmp = std::env::temp_dir().join(format!("opencam_est_{}.{}", std::process::id(), opt.format.ext()));
-    let r = export(frames, &tmp, opt, s, &|_, _| {});
-    let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
-    let _ = std::fs::remove_file(&tmp);
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("opencam_est_{}_{n}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let r = export(frames, &dir.join(format!("estimate.{}", opt.format.ext())), opt, s, &|_, _| {});
+    let size = std::fs::read_dir(&dir)
+        .map(|rd| rd.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum())
+        .unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&dir);
     r.map(|_| size)
 }
 
@@ -874,6 +880,27 @@ mod tests {
         let px = out[1].rgba();
         let last_row = (7 * 8) * 4;
         assert_eq!(&px[last_row..last_row + 3], &[255, 0, 0]);
+    }
+
+    #[test]
+    fn estimate_png_sequence_counts_all_files_and_cleans_up() {
+        // 예전에는 크기 0으로 나오고 임시 폴더에 PNG가 프레임 수만큼 남았다
+        let s = Settings::default();
+        let input = frames(3, 100);
+        let size = estimate_size(&input, &opts(Format::Png), &s).unwrap();
+        let dir = std::env::temp_dir().join(format!("opencam_png_seq_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        export(&input, &dir.join("a.png"), &opts(Format::Png), &s, &|_, _| {}).unwrap();
+        let real: u64 = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(size, real);
+        let prefix = format!("opencam_est_{}_", std::process::id());
+        let left = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .count();
+        assert_eq!(left, 0, "임시 파일이 남지 않는다");
     }
 
     #[test]
