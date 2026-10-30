@@ -673,6 +673,7 @@ fn on_hotkey(app: &AppHandle, sc: &Shortcut) {
 struct ProjectView {
     frames: Vec<FrameInfo>,
     can_undo: bool,
+    can_redo: bool,
     dirty: bool,
     /// 편집 뒤 바뀐 선택 (앞뒤 이동 등)
     selection: Option<Vec<usize>>,
@@ -682,7 +683,15 @@ struct ProjectView {
 }
 
 fn view(p: &Project, selection: Option<Vec<usize>>, message: Option<String>) -> ProjectView {
-    ProjectView { frames: p.infos(), can_undo: p.can_undo(), dirty: p.dirty, selection, message, memory_bytes: p.memory_bytes() }
+    ProjectView {
+        frames: p.infos(),
+        can_undo: p.can_undo(),
+        can_redo: p.can_redo(),
+        dirty: p.dirty,
+        selection,
+        message,
+        memory_bytes: p.memory_bytes(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -708,6 +717,7 @@ enum EditOp {
     Resize { w: u32, h: u32, smooth: bool },
     Rotate { r: Rotate },
     Undo,
+    Redo,
     RestoreInitial,
     SetInitial,
     Filters { sel: Vec<usize>, filters: Vec<Filter> },
@@ -760,6 +770,11 @@ async fn edit(app: AppHandle, op: EditOp) -> CmdResult<ProjectView> {
             EditOp::Undo => {
                 if !p.undo() {
                     message = Some("되돌릴 작업이 없습니다".into());
+                }
+            }
+            EditOp::Redo => {
+                if !p.redo() {
+                    message = Some("다시 실행할 작업이 없습니다".into());
                 }
             }
             EditOp::RestoreInitial => p.restore_initial(),

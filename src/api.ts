@@ -121,10 +121,11 @@ export interface FrameInfo {
 export interface ProjectView {
   frames: FrameInfo[];
   canUndo: boolean;
+  canRedo: boolean;
   dirty: boolean;
   selection: number[] | null;
   message: string | null;
-  /** 편집에 쓰는 메모리(바이트, 되돌리기 기록 포함) */
+  /** 편집에 쓰는 메모리(바이트, 되돌리기·다시 실행 기록 포함) */
   memoryBytes: number;
 }
 
@@ -313,6 +314,7 @@ export type EditOp =
   | { op: "resize"; w: number; h: number; smooth: boolean }
   | { op: "rotate"; r: Rotate }
   | { op: "undo" }
+  | { op: "redo" }
   | { op: "restoreInitial" }
   | { op: "setInitial" }
   | { op: "filters"; sel: number[]; filters: Filter[] }

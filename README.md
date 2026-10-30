@@ -69,6 +69,7 @@ F2·F3는 OpenCam이 켜져 있는 동안 다른 프로그램보다 먼저 받�
 | Ctrl+A / Esc | 모두 선택 / 선택 해제 |
 | Ctrl+C / Ctrl+X / Ctrl+V | 프레임 복사 / 잘라내기 / 붙여넣기 |
 | Ctrl+Z | 되돌리기 |
+| Ctrl+Y / Ctrl+Shift+Z | 다시 실행 |
 | Ctrl+S | 저장 |
 | Ctrl+O | 파일 열기 |
 | Ctrl+Shift+E | 프레임을 이미지로 내보내기 |

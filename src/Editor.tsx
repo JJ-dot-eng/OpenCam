@@ -7,6 +7,7 @@ import { api, EditOp, errText, extOf, formatBytes, formatMs, frameUrl, hexToRgb,
 import {
   IconAdjustmentsHorizontal,
   IconArrowBackUp,
+  IconArrowForwardUp,
   IconArrowsLeftRight,
   IconArrowsMaximize,
   IconCircleDot,
@@ -107,7 +108,7 @@ const FRAME_ACTIONS: [string, string, Icon, string][] = [
 const ZOOM_MIN = 0.05;
 const ZOOM_MAX = 8;
 
-const EMPTY: ProjectView = { frames: [], canUndo: false, dirty: false, selection: null, message: null, memoryBytes: 0 };
+const EMPTY: ProjectView = { frames: [], canUndo: false, canRedo: false, dirty: false, selection: null, message: null, memoryBytes: 0 };
 
 export default function Editor() {
   const [view, setView] = useState<ProjectView>(EMPTY);
@@ -428,6 +429,7 @@ export default function Editor() {
       else if (ctrl && e.shiftKey && k === "e") setDialog("exportFrames");
       else if (ctrl && k === "x") run({ op: "cut", sel: target });
       else if (ctrl && k === "v") run({ op: "paste", at: current + 1 });
+      else if (ctrl && (k === "y" || (e.shiftKey && k === "z"))) run({ op: "redo" });
       else if (ctrl && k === "z") run({ op: "undo" });
       else if (ctrl && k === "s") setDialog("save");
       else if (ctrl && k === "o") openPaths();
@@ -551,6 +553,9 @@ export default function Editor() {
         <button className="ghost icon" disabled={empty || !view.canUndo || busy} onClick={() => run({ op: "undo" })} title="되돌리기 (Ctrl+Z)">
           <IconArrowBackUp size={18} />
         </button>
+        <button className="ghost icon" disabled={empty || !view.canRedo || busy} onClick={() => run({ op: "redo" })} title="다시 실행 (Ctrl+Y)">
+          <IconArrowForwardUp size={18} />
+        </button>
         <button
           className="ghost icon"
           disabled={empty || busy}
@@ -615,7 +620,7 @@ export default function Editor() {
               <span>·</span>
               <span>{formatMs(total)}</span>
               <span>·</span>
-              <span title="편집에 쓰는 메모리 (되돌리기 기록 포함)">메모리 {formatBytes(view.memoryBytes)}</span>
+              <span title="편집에 쓰는 메모리 (되돌리기·다시 실행 기록 포함)">메모리 {formatBytes(view.memoryBytes)}</span>
             </div>
           )}
           <main className="ed-stage" ref={stageRef}>

@@ -18,6 +18,8 @@ pub struct FrameInfo {
 pub struct Project {
     pub frames: Vec<Frame>,
     undo: Vec<Vec<Frame>>,
+    /// 되돌린 상태들. 새 편집을 하면 비운다.
+    redo: Vec<Vec<Frame>>,
     /// 처음 상태 (Ctrl+Alt+S로 바꿀 수 있음)
     initial: Vec<Frame>,
     clipboard: Vec<Frame>,
@@ -71,6 +73,7 @@ impl Project {
         self.initial = frames.clone();
         self.frames = frames;
         self.undo.clear();
+        self.redo.clear();
         self.dirty = false;
     }
 
@@ -81,11 +84,12 @@ impl Project {
             .collect()
     }
 
-    /// 편집에 쓰는 메모리(압축된 픽셀). 지금 프레임·되돌리기 기록·처음 상태·복사해 둔 것을 합치되,
+    /// 편집에 쓰는 메모리(압축된 픽셀). 지금 프레임·되돌리기/다시 실행 기록·처음 상태·복사해 둔 것을 합치되,
     /// 같은 버퍼는 한 번만 센다.
     pub fn memory_bytes(&self) -> u64 {
         let mut seen = std::collections::HashSet::new();
-        let all = self.frames.iter().chain(self.undo.iter().flatten()).chain(&self.initial).chain(&self.clipboard);
+        let history = self.undo.iter().chain(&self.redo).flatten();
+        let all = self.frames.iter().chain(history).chain(&self.initial).chain(&self.clipboard);
         all.filter(|f| seen.insert(f.packed_key())).map(|f| f.packed_bytes() as u64).sum()
     }
 
@@ -101,13 +105,24 @@ impl Project {
                 self.undo.remove(0);
             }
         }
+        self.redo.clear();
         self.dirty = true;
     }
 
     pub fn undo(&mut self) -> bool {
         match self.undo.pop() {
             Some(prev) => {
-                self.frames = prev;
+                self.redo.push(std::mem::replace(&mut self.frames, prev));
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        match self.redo.pop() {
+            Some(next) => {
+                self.undo.push(std::mem::replace(&mut self.frames, next));
                 true
             }
             None => false,
@@ -116,6 +131,10 @@ impl Project {
 
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     pub fn set_initial(&mut self) {
@@ -847,6 +866,40 @@ mod tests {
         // 100ms 제한: 60 + 60 > 100 이라 합치지 않고 계속 새 기준이 된다
         assert_eq!(p.reduce_similar(&[], 20, 20, Some(100), true), 0);
         assert_eq!(p.reduce_similar(&[], 20, 20, Some(130), true), 2);
+    }
+
+    #[test]
+    fn redo_after_undo_and_cleared_by_new_edit() {
+        let mut p = Project { undo_enabled: true, ..Default::default() };
+        p.load((0..4).map(|i| solid(1, 1, i, 10)).collect());
+        assert!(!p.redo());
+        p.delete(&[0]);
+        p.delete(&[0]);
+        assert_eq!(p.frames.len(), 2);
+        assert!(p.undo());
+        assert!(p.undo());
+        assert_eq!(p.frames.len(), 4);
+        assert!(p.redo());
+        assert_eq!(p.frames.len(), 3);
+        assert!(p.can_undo() && p.can_redo());
+        // 되돌린 뒤 새로 편집하면 다시 실행할 것이 없어진다
+        p.set_delay(&[], 50);
+        assert!(!p.can_redo());
+        assert!(!p.redo());
+        assert!(p.undo());
+        assert_eq!(p.frames.len(), 3);
+        assert!(p.frames.iter().all(|f| f.delay_ms == 10));
+        // 처음 상태로도 되돌리고 다시 실행할 수 있다
+        p.restore_initial();
+        assert_eq!(p.frames.len(), 4);
+        assert!(p.undo());
+        assert_eq!(p.frames.len(), 3);
+        assert!(p.redo());
+        assert_eq!(p.frames.len(), 4);
+        // 새로 불러오면 두 기록 모두 비운다
+        assert!(p.undo());
+        p.load(vec![solid(1, 1, 0, 10)]);
+        assert!(!p.can_undo() && !p.can_redo());
     }
 
     #[test]
