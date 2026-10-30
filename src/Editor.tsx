@@ -411,12 +411,13 @@ export default function Editor() {
   };
 
   /** 썸네일 끌어 놓기: 잡은 프레임이 선택에 들어 있으면 선택한 프레임을 함께 옮긴다 */
-  const moveFrames = (i: number, to: number) => run({ op: "moveTo", sel: sel.includes(i) ? sel : [i], to });
+  const moveFrames = (i: number, to: number) => !busy && run({ op: "moveTo", sel: sel.includes(i) ? sel : [i], to });
 
   // 단축키
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || menu || frames.length === 0 || isModalOpen()) return;
+      // 처리 중에는 버튼처럼 단축키도 막는다 (편집이 겹치지 않게)
+      if (busy || dialog || menu || frames.length === 0 || isModalOpen()) return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if (mode) return; // 도구 화면이 자기 단축키를 처리한다
