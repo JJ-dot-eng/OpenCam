@@ -175,6 +175,14 @@ pub fn make(clips: &[Vec<Frame>], o: &CollageOptions, bg_image: Option<(u32, u32
     if o.width < 2 || o.height < 2 {
         bail!("캔버스가 너무 작습니다");
     }
+    // 여백·선 폭이 캔버스를 다 차지하면 칸이 캔버스 밖으로 나간다 (칸마다 최소 1픽셀)
+    let fits = |size: u32, n: u32| {
+        let n = u64::from(n.clamp(1, 10));
+        2 * u64::from(o.margin) + (n - 1) * u64::from(o.gap) + n <= u64::from(size)
+    };
+    if !fits(o.width, o.cols) || !fits(o.height, o.rows) {
+        bail!("가장자리 여백과 선 폭이 캔버스보다 커서 칸을 넣을 자리가 없습니다");
+    }
     let cells = cells(o);
     let used = clips.len().min(cells.len());
     let base = base_canvas(o, &cells, bg_image.as_ref());
@@ -290,6 +298,21 @@ mod tests {
         o.border_color = [0, 0, 255];
         let out = make(&[clip(1, 100, 9), clip(1, 100, 9)], &o, None).unwrap();
         assert_eq!(&out[0].rgba()[4 * 4..4 * 4 + 3], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn margin_or_gap_larger_than_canvas_is_an_error() {
+        // 예전에는 칸이 캔버스 밖으로 나가 그리다가 프로그램이 꺼졌다
+        let mut o = opts(PlayMode::Hold);
+        o.margin = 6; // 가로 10에 여백 6×2
+        assert!(make(&[clip(1, 100, 9)], &o, None).is_err());
+        let mut o = opts(PlayMode::Hold);
+        o.gap = 9; // 칸 2개 + 선 9 = 11 > 10
+        assert!(make(&[clip(1, 100, 9), clip(1, 100, 9)], &o, None).is_err());
+        // 딱 맞으면 된다: 칸 1 + 선 8 + 칸 1 = 10
+        o.gap = 8;
+        let out = make(&[clip(1, 100, 9), clip(1, 100, 9)], &o, None).unwrap();
+        assert_eq!((out[0].width, out[0].height), (10, 4));
     }
 
     #[test]
