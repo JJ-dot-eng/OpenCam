@@ -651,7 +651,7 @@ export default function Editor() {
                   </button>
                 </div>
                 <p className="hint">GIF·WebP·APNG·동영상·이미지 파일을 여기로 끌어 놓아도 됩니다.</p>
-                <RecoveryList onOpen={(id) => exec(() => api.recoveryOpen(id))} onError={showToast} />
+                <RecoveryList busy={busy} onOpen={(id) => exec(() => api.recoveryOpen(id))} onError={showToast} />
               </div>
             ) : mode === "crop" && cur ? (
               <CropView

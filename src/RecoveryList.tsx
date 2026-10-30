@@ -37,7 +37,16 @@ function Thumb({ id }: { id: string }) {
   return <div className="rec-thumb">{url && <img src={url} alt="" />}</div>;
 }
 
-export default function RecoveryList({ onOpen, onError }: { onOpen: (id: string) => void; onError: (m: string) => void }) {
+export default function RecoveryList({
+  busy,
+  onOpen,
+  onError,
+}: {
+  /** 다른 작업(복구 포함)을 처리 중이면 버튼을 막는다. 복구를 겹쳐 누르면 복구본이 둘 다 지워진다. */
+  busy: boolean;
+  onOpen: (id: string) => void;
+  onError: (m: string) => void;
+}) {
   const [items, setItems] = useState<RecoveryEntry[]>([]);
   const refresh = useCallback(() => {
     api.recoveryList().then(setItems, () => setItems([]));
@@ -66,11 +75,11 @@ export default function RecoveryList({ onOpen, onError }: { onOpen: (id: string)
               {e.frames}장 · {formatMs(e.totalMs)} · {e.width}×{e.height}
             </span>
           </div>
-          <button className="primary" onClick={() => onOpen(e.id)} title="이 작업을 편집 창으로 불러옵니다">
+          <button className="primary" disabled={busy} onClick={() => onOpen(e.id)} title="이 작업을 편집 창으로 불러옵니다">
             <IconRestore size={18} />
             복구
           </button>
-          <button className="ghost icon" onClick={() => discard(e)} title="버리기">
+          <button className="ghost icon" disabled={busy} onClick={() => discard(e)} title="버리기">
             <IconX size={18} />
           </button>
         </div>
