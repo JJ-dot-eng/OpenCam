@@ -1361,11 +1361,18 @@ fn start_editing(app: &AppHandle, loaded: import::Loaded, unsaved: bool) -> Proj
 /// 이보다 디스크 공간이 적으면 자동 저장을 멈춘다
 const AUTOSAVE_MIN_FREE: u64 = 1024 * 1024 * 1024;
 
+/// 자동 저장(또는 비우기)할 때인가. key는 지금의 (프레임 목록 판, 작업 자동 저장 설정),
+/// saved는 마지막으로 저장하거나 비운 때의 key, still은 지금 판이 더 바뀌지 않고 지난 시간.
+/// 설정만 바뀌어도 다시 따진다 (켜면 바로 저장하고, 끄면 바로 지운다).
+fn autosave_due(saved: Option<(u64, bool)>, key: (u64, bool), still: std::time::Duration) -> bool {
+    saved != Some(key) && still >= std::time::Duration::from_secs(3)
+}
+
 /// 프레임 목록이 바뀌고 3초 동안 더 바뀌지 않으면 자동 저장한다
 fn autosave_loop(app: AppHandle) {
     let state = app.state::<AppState>();
     let dir = recovery::current(&recovery::root());
-    let mut saved_rev = None; // 마지막으로 저장(또는 비움)한 판
+    let mut saved = None; // 마지막으로 저장(또는 비움)한 (판, 설정)
     let mut seen = (0u64, std::time::Instant::now()); // 마지막으로 본 판과 처음 본 시각
     let mut warned = false;
     loop {
@@ -1375,7 +1382,7 @@ fn autosave_loop(app: AppHandle) {
             seen = (rev, std::time::Instant::now());
             continue;
         }
-        if saved_rev == Some(rev) || seen.1.elapsed() < std::time::Duration::from_secs(3) {
+        if !autosave_due(saved, (rev, state.settings.lock().auto_recovery), seen.1.elapsed()) {
             continue;
         }
         let stopped = state.recovery_io.lock();
@@ -1386,7 +1393,8 @@ fn autosave_loop(app: AppHandle) {
             let p = state.project.lock();
             (p.revision, p.frames.clone())
         };
-        if frames.is_empty() || !state.settings.lock().auto_recovery {
+        let enabled = state.settings.lock().auto_recovery;
+        if frames.is_empty() || !enabled {
             recovery::clear(&dir);
         } else if recovery::free_space(&dir).is_some_and(|f| f < AUTOSAVE_MIN_FREE) {
             if !warned {
@@ -1403,7 +1411,7 @@ fn autosave_loop(app: AppHandle) {
             continue;
         }
         warned = false;
-        saved_rev = Some(rev);
+        saved = Some((rev, enabled));
     }
 }
 
@@ -1807,6 +1815,20 @@ mod tests {
         assert_eq!(image::open(&path).unwrap().to_rgba8().as_raw(), &rgba);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn autosave_follows_the_setting_without_waiting_for_an_edit() {
+        use std::time::Duration;
+        let long = Duration::from_secs(10);
+        // 바뀐 판은 3초 동안 더 안 바뀌어야 저장
+        assert!(!autosave_due(Some((4, true)), (5, true), Duration::from_secs(1)));
+        assert!(autosave_due(Some((4, true)), (5, true), long));
+        assert!(!autosave_due(Some((5, true)), (5, true), long));
+        // 꺼 둔 채 편집하다가 켜면, 다음 편집을 기다리지 않고 지금 작업을 저장한다
+        assert!(autosave_due(Some((5, false)), (5, true), long));
+        // 끄면 바로 지운다
+        assert!(autosave_due(Some((5, true)), (5, false), long));
     }
 
     #[test]
