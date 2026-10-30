@@ -79,52 +79,65 @@ fn gif_delay(ms: u32) -> u32 {
     if ms <= 10 { 100 } else { ms }
 }
 
-/// 파일 하나를 (가로, 세로, RGBA, 시간) 목록으로. 움직이지 않는 그림이면 한 장에 still_ms.
-fn decode_file(path: &Path, still_ms: u32) -> Result<Vec<(u32, u32, Vec<u8>, u32)>> {
+/// 파일 하나의 프레임을 (가로, 세로, RGBA, 시간)으로 하나씩 on_frame에 넘긴다. 움직이지 않는 그림이면 한 장에 still_ms.
+/// on_frame이 false를 돌려주면 (메모리 한도) 나머지 프레임은 풀지 않고 멈춘다.
+fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Vec<u8>, u32) -> bool) -> Result<()> {
     let open = || -> Result<BufReader<std::fs::File>> {
         Ok(BufReader::new(
             std::fs::File::open(path).with_context(|| format!("파일을 열 수 없습니다: {}", path.display()))?,
         ))
     };
-    let frames_of = |frames: image::Frames| -> Result<Vec<(u32, u32, Vec<u8>, u32)>> {
-        frames
-            .map(|f| {
-                let f = f?;
-                let (n, d) = f.delay().numer_denom_ms();
-                let ms = if d == 0 { 100 } else { n / d };
-                let buf = f.into_buffer();
-                Ok((buf.width(), buf.height(), buf.into_raw(), gif_delay(ms)))
-            })
-            .collect()
+    let mut any = false;
+    let mut frames_of = |frames: image::Frames| -> Result<()> {
+        for f in frames {
+            let f = f?;
+            let (n, d) = f.delay().numer_denom_ms();
+            let ms = if d == 0 { 100 } else { n / d };
+            let buf = f.into_buffer();
+            any = true;
+            if !on_frame(buf.width(), buf.height(), buf.into_raw(), gif_delay(ms)) {
+                break;
+            }
+        }
+        Ok(())
     };
-    let still = |img: RgbaImage| vec![(img.width(), img.height(), img.into_raw(), still_ms)];
+    let still = |img: RgbaImage| (img.width(), img.height(), img.into_raw());
     let ext = ext_of(path);
-    let out = match ext.as_str() {
-        "gif" => frames_of(image::codecs::gif::GifDecoder::new(open()?)?.into_frames())?,
+    let single = match ext.as_str() {
+        "gif" => {
+            frames_of(image::codecs::gif::GifDecoder::new(open()?)?.into_frames())?;
+            None
+        }
         "webp" => {
             let d = image::codecs::webp::WebPDecoder::new(open()?)?;
             if d.has_animation() {
-                frames_of(d.into_frames())?
+                frames_of(d.into_frames())?;
+                None
             } else {
-                still(image::DynamicImage::from_decoder(d)?.to_rgba8())
+                Some(still(image::DynamicImage::from_decoder(d)?.to_rgba8()))
             }
         }
         "png" | "apng" => {
             let d = image::codecs::png::PngDecoder::new(open()?)?;
             if d.is_apng()? {
-                frames_of(d.apng()?.into_frames())?
+                frames_of(d.apng()?.into_frames())?;
+                None
             } else {
-                still(image::DynamicImage::from_decoder(d)?.to_rgba8())
+                Some(still(image::DynamicImage::from_decoder(d)?.to_rgba8()))
             }
         }
-        _ => still(
+        _ => Some(still(
             image::open(path).with_context(|| format!("이미지를 읽을 수 없습니다: {}", path.display()))?.to_rgba8(),
-        ),
+        )),
     };
-    if out.is_empty() {
+    if let Some((w, h, px)) = single {
+        any = true;
+        on_frame(w, h, px, still_ms);
+    }
+    if !any {
         bail!("프레임이 없는 파일입니다: {}", path.display());
     }
-    Ok(out)
+    Ok(())
 }
 
 /// 그림을 (tw, th) 크기에 맞춘다
@@ -154,18 +167,19 @@ pub fn fit_rgba(w: u32, h: u32, px: &[u8], tw: u32, th: u32, fit: Fit) -> Vec<u8
 pub fn load_files(paths: &[String], still_ms: u32, fit: Fit, max_bytes: usize, progress: Progress) -> Result<Loaded> {
     let mut c = Collector::new(max_bytes);
     let mut size: Option<(u32, u32)> = None;
-    'files: for (k, p) in paths.iter().enumerate() {
+    for (k, p) in paths.iter().enumerate() {
         let path = Path::new(p);
         if is_video(path) {
             bail!("동영상은 하나씩 따로 열어 주세요: {}", path.display());
         }
         progress(k as f32 / paths.len() as f32, "불러오는 중");
-        for (w, h, px, ms) in decode_file(path, still_ms.max(10))? {
+        decode_file(path, still_ms.max(10), &mut |w, h, px, ms| {
             let (tw, th) = *size.get_or_insert((w, h));
             let px = fit_rgba(w, h, &px, tw, th, fit);
-            if !c.push(Frame::from_rgba(tw, th, &px, ms)) {
-                break 'files;
-            }
+            c.push(Frame::from_rgba(tw, th, &px, ms))
+        })?;
+        if c.full {
+            break;
         }
     }
     c.finish()
@@ -376,6 +390,33 @@ mod tests {
         let loaded = load_files(&paths, 250, Fit::Stretch, usize::MAX, &|_, _| {}).unwrap();
         assert_eq!(loaded.frames.len(), 2);
         assert!(loaded.frames.iter().all(|f| (f.width, f.height, f.delay_ms) == (4, 4, 250)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn animated_file_stops_decoding_at_memory_limit() {
+        // 둘째 프레임이 깨진 GIF. 메모리 한도로 첫 장만 쓰면 둘째 장은 풀지 않아야 한다
+        // (예전에는 모든 프레임을 먼저 풀어서, 긴 GIF는 한도와 상관없이 메모리를 다 썼다)
+        let dir = std::env::temp_dir().join(format!("opencam_import_limit_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cut.gif");
+        {
+            let mut enc = gif::Encoder::new(std::fs::File::create(&path).unwrap(), 64, 64, &[0, 0, 0, 255, 255, 255])
+                .unwrap();
+            for k in 0..2u8 {
+                let mut fr = gif::Frame { width: 64, height: 64, ..Default::default() };
+                fr.buffer = std::borrow::Cow::Owned((0..64 * 64).map(|i| ((i as u8) ^ k) & 1).collect());
+                enc.write_frame(&fr).unwrap();
+            }
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - 40]).unwrap();
+        let p = [path.to_string_lossy().into_owned()];
+        let loaded = load_files(&p, 100, Fit::Contain, 1, &|_, _| {}).unwrap();
+        assert_eq!(loaded.frames.len(), 1);
+        assert!(loaded.warning.is_some());
+        // 한도가 넉넉하면 깨진 프레임까지 읽으므로 오류
+        assert!(load_files(&p, 100, Fit::Contain, usize::MAX, &|_, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
