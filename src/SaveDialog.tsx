@@ -33,10 +33,12 @@ interface Props {
   frames: FrameInfo[];
   onClose: () => void;
   onSaved: () => void;
+  /** 방금 저장한 파일을 지웠다 (다시 저장하지 않은 상태로) */
+  onDeleted: () => void;
   onNewRecording: () => void;
 }
 
-export default function SaveDialog({ settings, frames, onClose, onSaved, onNewRecording }: Props) {
+export default function SaveDialog({ settings, frames, onClose, onSaved, onDeleted, onNewRecording }: Props) {
   const [format, setFormat] = useState<Format>("gif");
   const [quality, setQuality] = useState(settings.gifQuality);
   const [path, setPath] = useState("");
@@ -181,6 +183,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onNewRe
               if (!(await confirmAsk("방금 저장한 파일을 지울까요?", "지우기"))) return;
               try {
                 await api.deleteFile(done.path);
+                onDeleted();
                 onClose();
               } catch (e) {
                 setError(errText(e));
