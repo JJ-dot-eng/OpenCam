@@ -91,6 +91,12 @@ export default function SettingsDialog({ settings, onClose, onSaved }: Props) {
             <Check label="파일을 지울 때 휴지통으로" checked={s.deleteToRecycleBin} onChange={(v) => set("deleteToRecycleBin", v)} />
             <Check label="켤 때 새 버전 확인 (GitHub에 접속)" checked={s.checkUpdates} onChange={(v) => set("checkUpdates", v)} />
             <Check
+              label="작업 자동 저장 (비정상 종료 시 복구)"
+              checked={s.autoRecovery}
+              onChange={(v) => set("autoRecovery", v)}
+            />
+            <p className="hint">편집 중인 프레임이 PC에 임시로 남습니다. 정상적으로 끄면 지웁니다.</p>
+            <Check
               label="저장하지 않은 녹화·편집 내용을 버릴 때 묻지 않기"
               checked={s.doNotAskDiscardRecording}
               onChange={(v) => set("doNotAskDiscardRecording", v)}

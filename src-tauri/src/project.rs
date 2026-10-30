@@ -25,6 +25,8 @@ pub struct Project {
     clipboard: Vec<Frame>,
     pub undo_enabled: bool,
     pub dirty: bool,
+    /// 프레임 목록이 바뀔 때마다 늘어나는 번호 (작업 자동 저장이 바뀐 것을 알아챈다)
+    pub revision: u64,
     /// 영상 요약용 "앞 프레임과 얼마나 다른가" 점수. 프레임 id 목록이 같을 때만 다시 쓴다.
     change_scores: Option<(Vec<u64>, Vec<f32>)>,
 }
@@ -75,6 +77,7 @@ impl Project {
         self.undo.clear();
         self.redo.clear();
         self.dirty = false;
+        self.revision += 1;
     }
 
     pub fn infos(&self) -> Vec<FrameInfo> {
@@ -107,12 +110,14 @@ impl Project {
         }
         self.redo.clear();
         self.dirty = true;
+        self.revision += 1;
     }
 
     pub fn undo(&mut self) -> bool {
         match self.undo.pop() {
             Some(prev) => {
                 self.redo.push(std::mem::replace(&mut self.frames, prev));
+                self.revision += 1;
                 true
             }
             None => false,
@@ -123,6 +128,7 @@ impl Project {
         match self.redo.pop() {
             Some(next) => {
                 self.undo.push(std::mem::replace(&mut self.frames, next));
+                self.revision += 1;
                 true
             }
             None => false,

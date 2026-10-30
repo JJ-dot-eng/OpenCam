@@ -15,6 +15,8 @@ pub struct Settings {
     pub delete_to_recycle_bin: bool,
     /// 켤 때 GitHub 릴리스에서 새 버전을 확인한다
     pub check_updates: bool,
+    /// 편집 중인 작업을 자동으로 저장해 두고, 비정상 종료 뒤 켤 때 복구를 묻는다
+    pub auto_recovery: bool,
 
     // 녹화
     pub fps: u32,
@@ -120,6 +122,7 @@ impl Default for Settings {
             do_not_ask_gif_50fps: false,
             delete_to_recycle_bin: true,
             check_updates: true,
+            auto_recovery: true,
 
             fps: 60,
             capture_cursor: false,

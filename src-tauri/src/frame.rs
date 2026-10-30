@@ -41,6 +41,18 @@ impl Frame {
         Frame { id: new_id(), ..self.clone() }
     }
 
+    /// 작업 자동 저장 파일에서 읽은 압축 픽셀로 만든다. 깨진 데이터면 None (나중에 풀다가 꺼지지 않게 미리 풀어 본다).
+    pub fn from_packed(width: u32, height: u32, delay_ms: u32, packed: Vec<u8>) -> Option<Self> {
+        let px = lz4_flex::decompress_size_prepended(&packed).ok()?;
+        (px.len() as u64 == width as u64 * height as u64 * 4 && width > 0 && height > 0)
+            .then(|| Frame { id: new_id(), width, height, delay_ms, packed: Arc::new(packed) })
+    }
+
+    /// 압축된 픽셀 (작업 자동 저장용)
+    pub fn packed(&self) -> &[u8] {
+        &self.packed
+    }
+
     pub fn packed_bytes(&self) -> usize {
         self.packed.len()
     }

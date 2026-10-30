@@ -23,6 +23,7 @@ export interface Settings {
   doNotAskGif50fps: boolean;
   deleteToRecycleBin: boolean;
   checkUpdates: boolean;
+  autoRecovery: boolean;
 
   fps: number;
   captureCursor: boolean;
@@ -116,6 +117,17 @@ export interface FrameInfo {
   width: number;
   height: number;
   delayMs: number;
+}
+
+/** 비정상 종료로 남은 작업 */
+export interface RecoveryEntry {
+  id: string;
+  /** 마지막 자동 저장 시각 (Unix ms) */
+  savedAt: number;
+  frames: number;
+  width: number;
+  height: number;
+  totalMs: number;
 }
 
 export interface ProjectView {
@@ -346,6 +358,10 @@ export const api = {
   recSnapshotGlobalActive: () => invoke<boolean>("rec_snapshot_global_active"),
   showRecorder: () => invoke<void>("show_recorder"),
   quitApp: () => invoke<void>("quit_app"),
+  recoveryList: () => invoke<RecoveryEntry[]>("recovery_list"),
+  recoveryThumb: (id: string) => invoke<ArrayBuffer>("recovery_thumb", { id }),
+  recoveryOpen: (id: string) => invoke<ProjectView>("recovery_open", { id }),
+  recoveryDiscard: (id: string) => invoke<void>("recovery_discard", { id }),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
   projectView: () => invoke<ProjectView>("project_view"),

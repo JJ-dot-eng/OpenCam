@@ -56,6 +56,7 @@ features = [
   "Win32_Media",
   "Win32_Graphics_Dwm",
   "Win32_UI_Shell",
+  "Win32_Storage_FileSystem",
 ]
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

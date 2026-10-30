@@ -10,6 +10,7 @@ mod import;
 mod magnifier;
 mod project;
 mod recorder;
+mod recovery;
 mod settings;
 mod superres;
 mod window_picker;
@@ -41,6 +42,8 @@ struct AppState {
     /// 시작할 때 생긴 문제(단축키 등록 실패 등). 녹화 틀이 뜨면 한 번 보여 준다.
     startup_notice: Mutex<Option<String>>,
     snapshot_hotkey: Mutex<bool>,
+    /// 작업 자동 저장 파일을 쓰는 동안 잡는다. true면 프로그램을 끝내는 중이라 더 쓰지 않는다.
+    recovery_io: Mutex<bool>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -514,7 +517,13 @@ fn write_new_recording_png(path: &Path, width: u32, height: u32, rgba: &[u8]) ->
 
 /// 프로그램 끝내기 (편집 창을 닫을 때)
 #[tauri::command]
-fn quit_app(app: AppHandle) {
+fn quit_app(app: AppHandle, state: State<AppState>) {
+    // 정상 종료: 자동 저장해 둔 작업은 지운다 (남아 있으면 다음에 켤 때 비정상 종료로 본다)
+    {
+        let mut stopped = state.recovery_io.lock();
+        *stopped = true;
+        recovery::clear(&recovery::current(&recovery::root()));
+    }
     app.exit(0);
 }
 
@@ -522,6 +531,10 @@ fn quit_app(app: AppHandle) {
 #[tauri::command]
 fn show_recorder(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
     state.project.lock().load(vec![]);
+    {
+        let _io = state.recovery_io.lock();
+        recovery::clear(&recovery::current(&recovery::root()));
+    }
     if let Some(m) = app.get_webview_window("main") {
         let _ = m.hide();
     }
@@ -1343,6 +1356,110 @@ fn start_editing(app: &AppHandle, loaded: import::Loaded, unsaved: bool) -> Proj
     v
 }
 
+// ---------- 작업 자동 저장·복구 ----------
+
+/// 이보다 디스크 공간이 적으면 자동 저장을 멈춘다
+const AUTOSAVE_MIN_FREE: u64 = 1024 * 1024 * 1024;
+
+/// 프레임 목록이 바뀌고 3초 동안 더 바뀌지 않으면 자동 저장한다
+fn autosave_loop(app: AppHandle) {
+    let state = app.state::<AppState>();
+    let dir = recovery::current(&recovery::root());
+    let mut saved_rev = None; // 마지막으로 저장(또는 비움)한 판
+    let mut seen = (0u64, std::time::Instant::now()); // 마지막으로 본 판과 처음 본 시각
+    let mut warned = false;
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let rev = state.project.lock().revision;
+        if rev != seen.0 {
+            seen = (rev, std::time::Instant::now());
+            continue;
+        }
+        if saved_rev == Some(rev) || seen.1.elapsed() < std::time::Duration::from_secs(3) {
+            continue;
+        }
+        let stopped = state.recovery_io.lock();
+        if *stopped {
+            return;
+        }
+        let (rev, frames) = {
+            let p = state.project.lock();
+            (p.revision, p.frames.clone())
+        };
+        if frames.is_empty() || !state.settings.lock().auto_recovery {
+            recovery::clear(&dir);
+        } else if recovery::free_space(&dir).is_some_and(|f| f < AUTOSAVE_MIN_FREE) {
+            if !warned {
+                warned = true;
+                let _ = app.emit("notice", "디스크 공간이 1GB보다 적어 작업 자동 저장을 멈췄습니다".to_string());
+            }
+            continue;
+        } else if let Err(e) = recovery::save(&dir, &frames) {
+            eprintln!("자동 저장 실패: {e:#}");
+            if !warned {
+                warned = true;
+                let _ = app.emit("notice", format!("작업을 자동 저장하지 못했습니다: {e}"));
+            }
+            continue;
+        }
+        warned = false;
+        saved_rev = Some(rev);
+    }
+}
+
+/// 비정상 종료로 남은 작업들 (최근 것부터)
+#[tauri::command]
+fn recovery_list() -> Vec<recovery::Entry> {
+    recovery::list(&recovery::root())
+}
+
+/// 복구할 작업의 첫 프레임 썸네일 (PNG)
+#[tauri::command]
+async fn recovery_thumb(id: String) -> CmdResult<tauri::ipc::Response> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let f = recovery::first_frame(&recovery::entry_dir(&recovery::root(), &id)?)?;
+        let scale = (160.0 / f.width as f32).min(120.0 / f.height as f32).min(1.0);
+        let (tw, th) = (((f.width as f32 * scale) as u32).max(1), ((f.height as f32 * scale) as u32).max(1));
+        let px = project::resize_rgba(f.width, f.height, &f.rgba(), tw, th, true);
+        encode_png(tw, th, &px).ok_or_else(|| anyhow::anyhow!("썸네일을 만들지 못했습니다"))
+    })
+    .await
+    .map_err(err)?
+    .map(tauri::ipc::Response::new)
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// 남은 작업을 편집 창으로 불러온다. 바로 자동 저장해 두고 복구 목록에서는 지운다.
+#[tauri::command]
+async fn recovery_open(app: AppHandle, id: String) -> CmdResult<ProjectView> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = recovery::root();
+        let dir = recovery::entry_dir(&root, &id).map_err(|e| format!("{e:#}"))?;
+        let frames = recovery::load(&dir).map_err(|e| format!("복구하지 못했습니다: {e:#}"))?;
+        let state = app.state::<AppState>();
+        let v = start_editing(
+            &app,
+            import::Loaded { frames, warning: Some("작업을 복구했습니다 (되돌리기 기록은 없습니다)".into()) },
+            true,
+        );
+        // 새로 저장하지 못하면 복구 목록에 그대로 남겨 둔다
+        let _io = state.recovery_io.lock();
+        let frames = state.project.lock().frames.clone();
+        if !state.settings.lock().auto_recovery || recovery::save(&recovery::current(&root), &frames).is_ok() {
+            recovery::clear(&dir);
+        }
+        Ok(v)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+fn recovery_discard(id: String) -> CmdResult<()> {
+    let dir = recovery::entry_dir(&recovery::root(), &id).map_err(|e| format!("{e:#}"))?;
+    std::fs::remove_dir_all(dir).map_err(|e| format!("지우지 못했습니다: {e}"))
+}
+
 fn import_progress(app: &AppHandle) -> impl Fn(f32, &str) + Sync + use<> {
     let h = app.clone();
     move |progress, msg| {
@@ -1512,6 +1629,7 @@ pub fn run() {
             ctrl_prtsc_hotkey: Mutex::new(None),
             startup_notice: Mutex::new(None),
             snapshot_hotkey: Mutex::new(false),
+            recovery_io: Mutex::new(false),
         })
         .register_asynchronous_uri_scheme_protocol("frame", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
@@ -1540,6 +1658,9 @@ pub fn run() {
             if let Ok(r) = recorder_window(&h) {
                 let _ = r.set_always_on_top(on_top);
             }
+            recovery::adopt_leftover(&recovery::root());
+            let a = h.clone();
+            std::thread::Builder::new().name("opencam-autosave".into()).spawn(move || autosave_loop(a))?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1579,6 +1700,10 @@ pub fn run() {
             resize_mouse_down,
             start_magnifier,
             take_startup_notice,
+            recovery_list,
+            recovery_thumb,
+            recovery_open,
+            recovery_discard,
             get_full_capture,
             set_full_capture,
             capture_windows,
