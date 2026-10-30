@@ -66,6 +66,8 @@ export default function DrawView({ frame, scale, onApply, onCancel }: Props) {
   const H = frame.height;
   const canvas = useRef<HTMLCanvasElement>(null);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
+  /** 취소한 획 (다시 그리기용). 새로 그리면 비운다. */
+  const [undone, setUndone] = useState<Stroke[]>([]);
   const live = useRef<Stroke | null>(null);
   const [color, setColor] = useState("#ff3b30");
   const [size, setSize] = useState(6);
@@ -85,6 +87,17 @@ export default function DrawView({ frame, scale, onApply, onCancel }: Props) {
   };
 
   useEffect(() => redraw());
+
+  const undoStroke = () => {
+    if (strokes.length === 0) return;
+    setUndone([...undone, strokes[strokes.length - 1]]);
+    setStrokes(strokes.slice(0, -1));
+  };
+  const redoStroke = () => {
+    if (undone.length === 0) return;
+    setStrokes([...strokes, undone[undone.length - 1]]);
+    setUndone(undone.slice(0, -1));
+  };
 
   const toImage = (e: { clientX: number; clientY: number }): [number, number] => {
     const r = canvas.current!.getBoundingClientRect();
@@ -117,16 +130,22 @@ export default function DrawView({ frame, scale, onApply, onCancel }: Props) {
     const onUp = () => {
       const s = live.current;
       live.current = null;
-      if (s) setStrokes((all) => [...all, s]);
+      if (s) {
+        setStrokes((all) => [...all, s]);
+        setUndone([]);
+      }
     };
     const onKey = (e: KeyboardEvent) => {
       // 위에 확인·설정 같은 대화상자가 떠 있으면 그 창의 키다 (Esc·Enter가 도구까지 닫거나 적용하지 않게)
       if (isModalOpen()) return;
       if ((e.target as HTMLElement).tagName === "INPUT") return;
       if (e.key === "Escape") onCancel();
-      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+      else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) {
         e.preventDefault();
-        setStrokes((all) => all.slice(0, -1));
+        redoStroke();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undoStroke();
       }
     };
     window.addEventListener("mousemove", onMove);
@@ -211,10 +230,19 @@ export default function DrawView({ frame, scale, onApply, onCancel }: Props) {
         </Section>
         <Section title="그린 획">
           <div className="row">
-            <button disabled={strokes.length === 0} onClick={() => setStrokes((a) => a.slice(0, -1))}>
+            <button disabled={strokes.length === 0} onClick={undoStroke}>
               한 획 취소 (Ctrl+Z)
             </button>
-            <button disabled={strokes.length === 0} onClick={() => setStrokes([])}>
+            <button disabled={undone.length === 0} onClick={redoStroke}>
+              다시 그리기 (Ctrl+Y)
+            </button>
+            <button
+              disabled={strokes.length === 0}
+              onClick={() => {
+                setStrokes([]);
+                setUndone([]);
+              }}
+            >
               모두 지우기
             </button>
           </div>
