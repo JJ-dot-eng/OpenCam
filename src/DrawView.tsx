@@ -3,7 +3,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { IconColorPicker, IconEraser, IconPencil } from "@tabler/icons-react";
 import { FrameInfo, frameUrl } from "./api";
-import { Check } from "./dialogs";
+import { Check, isModalOpen } from "./dialogs";
 import SidePanel from "./SidePanel";
 import { ColorInput, Field, FrameContext, PanelFoot, Scope, ScopePicker, scopeSel, Section, Segmented, Slider, useReportDirty } from "./Panel";
 
@@ -120,6 +120,8 @@ export default function DrawView({ frame, scale, onApply, onCancel }: Props) {
       if (s) setStrokes((all) => [...all, s]);
     };
     const onKey = (e: KeyboardEvent) => {
+      // 위에 확인·설정 같은 대화상자가 떠 있으면 그 창의 키다 (Esc·Enter가 도구까지 닫거나 적용하지 않게)
+      if (isModalOpen()) return;
       if ((e.target as HTMLElement).tagName === "INPUT") return;
       if (e.key === "Escape") onCancel();
       else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {

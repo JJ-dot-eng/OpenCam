@@ -1054,12 +1054,14 @@ function FrameMenu({ x, y, busy, onPick, onClose }: { x: number; y: number; busy
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // 먼저 받아 멈춘다: 열린 도구 화면까지 Esc로 닫히지 않게
         e.preventDefault();
+        e.stopPropagation();
         onClose();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
   const items: [string, string, Icon, string][] = [...FRAME_ACTIONS, ["delete", "삭제", IconTrash, "Delete"]];
   return (

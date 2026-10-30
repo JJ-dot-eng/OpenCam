@@ -20,7 +20,7 @@ import {
   IconTypography,
 } from "@tabler/icons-react";
 import { Anim, api, errText, FrameInfo, frameUrl, OverlayMeta } from "./api";
-import { Check } from "./dialogs";
+import { Check, isModalOpen } from "./dialogs";
 import SidePanel from "./SidePanel";
 import {
   ColorInput,
@@ -415,6 +415,8 @@ export default function InsertView({ frame, scale, onApply, onCancel, onError }:
     };
     const onUp = () => (drag.current = null);
     const onKey = (e: KeyboardEvent) => {
+      // 위에 확인·설정 같은 대화상자가 떠 있으면 그 창의 키다 (Esc가 도구까지 닫지 않게)
+      if (isModalOpen()) return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (e.key === "Escape") onCancel();
