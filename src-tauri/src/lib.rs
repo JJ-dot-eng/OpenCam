@@ -1101,7 +1101,8 @@ fn list_files(dir: String) -> CmdResult<Vec<FileEntry>> {
     Ok(out)
 }
 
-/// 같은 폴더 안에서 이름만 바꾼다. 확장자가 없으면 원래 확장자를 붙인다.
+/// 같은 폴더 안에서 이름만 바꾼다. 움짤·동영상·이미지 확장자로 끝나지 않으면 원래 확장자를 붙인다
+/// ("2026.10.29"의 ".29"는 확장자가 아니다).
 #[tauri::command]
 fn rename_file(path: String, new_name: String) -> CmdResult<String> {
     let new_name = new_name.trim();
@@ -1111,7 +1112,8 @@ fn rename_file(path: String, new_name: String) -> CmdResult<String> {
     }
     let old = PathBuf::from(&path);
     let mut name = new_name.to_string();
-    if std::path::Path::new(&name).extension().is_none()
+    let typed = import::ext_of(std::path::Path::new(&name));
+    if !(import::IMAGE_EXTS.contains(&typed.as_str()) || import::VIDEO_EXTS.contains(&typed.as_str()))
         && let Some(ext) = old.extension()
     {
         name = format!("{name}.{}", ext.to_string_lossy());
@@ -1677,6 +1679,10 @@ mod tests {
         let b = rename_file(a.to_string_lossy().into_owned(), "새 이름".into()).unwrap();
         assert!(b.ends_with("새 이름.gif"));
         assert!(!a.exists());
+        // 이름에 점이 있어도 확장자가 아니면 원래 확장자를 붙인다 (예전에는 확장자 없는 파일이 되어 목록에서 사라졌다)
+        let dated = rename_file(b.clone(), "2026.10.29".into()).unwrap();
+        assert!(dated.ends_with("2026.10.29.gif"));
+        let b = rename_file(dated, "새 이름".into()).unwrap();
         // 쓸 수 없는 글자, 이미 있는 이름은 거절
         assert!(rename_file(b.clone(), "a/b".into()).is_err());
         std::fs::write(dir.join("c.gif"), b"y").unwrap();
