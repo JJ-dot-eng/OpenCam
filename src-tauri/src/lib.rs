@@ -1358,7 +1358,7 @@ fn start_editing(app: &AppHandle, loaded: import::Loaded, unsaved: bool) -> Proj
 
 // ---------- 작업 자동 저장·복구 ----------
 
-/// 이보다 디스크 공간이 적으면 자동 저장을 멈춘다
+/// 자동 저장한 뒤에도 디스크 공간이 이만큼은 남아야 한다 (모자라면 쓰지 않는다)
 const AUTOSAVE_MIN_FREE: u64 = 1024 * 1024 * 1024;
 
 /// 자동 저장(또는 비우기)할 때인가. key는 지금의 (프레임 목록 판, 작업 자동 저장 설정),
@@ -1396,10 +1396,11 @@ fn autosave_loop(app: AppHandle) {
         let enabled = state.settings.lock().auto_recovery;
         if frames.is_empty() || !enabled {
             recovery::clear(&dir);
-        } else if recovery::free_space(&dir).is_some_and(|f| f < AUTOSAVE_MIN_FREE) {
+        } else if !recovery::room_for(&dir, &frames, AUTOSAVE_MIN_FREE) {
             if !warned {
                 warned = true;
-                let _ = app.emit("notice", "디스크 공간이 1GB보다 적어 작업 자동 저장을 멈췄습니다".to_string());
+                let msg = "디스크 공간이 모자라 작업 자동 저장을 멈췄습니다 (저장 뒤에도 1GB는 남아야 합니다)";
+                let _ = app.emit("notice", msg.to_string());
             }
             continue;
         } else if let Err(e) = recovery::save(&dir, &frames) {
@@ -1408,6 +1409,8 @@ fn autosave_loop(app: AppHandle) {
                 warned = true;
                 let _ = app.emit("notice", format!("작업을 자동 저장하지 못했습니다: {e}"));
             }
+            // 같은 판을 1초마다 다시 쓰고 지우지 않게, 다음 편집 때 다시 해 본다
+            saved = Some((rev, enabled));
             continue;
         }
         warned = false;
@@ -1453,7 +1456,10 @@ async fn recovery_open(app: AppHandle, id: String) -> CmdResult<ProjectView> {
         // 새로 저장하지 못하면 복구 목록에 그대로 남겨 둔다
         let _io = state.recovery_io.lock();
         let frames = state.project.lock().frames.clone();
-        if !state.settings.lock().auto_recovery || recovery::save(&recovery::current(&root), &frames).is_ok() {
+        let cur = recovery::current(&root);
+        if !state.settings.lock().auto_recovery
+            || (recovery::room_for(&cur, &frames, AUTOSAVE_MIN_FREE) && recovery::save(&cur, &frames).is_ok())
+        {
             recovery::clear(&dir);
         }
         Ok(v)

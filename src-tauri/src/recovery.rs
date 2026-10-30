@@ -55,14 +55,56 @@ pub fn current(root: &Path) -> PathBuf {
 
 /// 프레임 목록을 dir에 저장한다. 픽셀 파일은 프레임 번호마다 한 번만 쓰고,
 /// 목록 파일은 다 쓴 뒤 바꿔치기해서 쓰다가 끊겨도 이전 목록이 남는다. 그다음 안 쓰는 픽셀 파일을 지운다.
+/// 쓰다 실패하면(디스크 가득 참 등) 이번에 새로 쓴 파일은 지운다. 이전 목록은 그 파일들을 쓰지 않는다.
 pub fn save(dir: &Path, frames: &[Frame]) -> Result<()> {
     let fdir = dir.join("frames");
     std::fs::create_dir_all(&fdir)?;
+    let mut written = vec![];
+    if let Err(e) = write_frames(dir, &fdir, frames, &mut written) {
+        for p in written {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e);
+    }
+    let used: HashSet<String> = frames.iter().map(|f| format!("{}.lz4", f.id)).collect();
+    for e in std::fs::read_dir(&fdir)?.flatten() {
+        if !used.contains(&*e.file_name().to_string_lossy()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    Ok(())
+}
+
+/// 이번 저장에서 새로 쓸 양: 아직 dir에 없는 픽셀 파일 크기의 합 (같은 프레임 번호는 한 번만)
+fn pending_bytes(dir: &Path, frames: &[Frame]) -> u64 {
+    let fdir = dir.join("frames");
+    let mut seen = HashSet::new();
+    frames
+        .iter()
+        .filter(|f| seen.insert(f.id) && !fdir.join(format!("{}.lz4", f.id)).exists())
+        .map(|f| f.packed_bytes() as u64)
+        .sum()
+}
+
+/// 남은 공간 free에 pending만큼 쓰고도 min_free가 남는가. 남은 공간을 모르면 쓴다.
+fn has_room(free: Option<u64>, pending: u64, min_free: u64) -> bool {
+    free.is_none_or(|f| f >= pending.saturating_add(min_free))
+}
+
+/// dir에 frames를 저장하고도 디스크 공간이 min_free 넘게 남는가
+pub fn room_for(dir: &Path, frames: &[Frame], min_free: u64) -> bool {
+    has_room(free_space(dir), pending_bytes(dir, frames), min_free)
+}
+
+/// 새 픽셀 파일과 목록 파일을 쓴다. 새로 쓴(또는 쓰다 만) 파일 경로는 written에 모은다.
+fn write_frames(dir: &Path, fdir: &Path, frames: &[Frame], written: &mut Vec<PathBuf>) -> Result<()> {
     for f in frames {
         let path = fdir.join(format!("{}.lz4", f.id));
         if !path.exists() {
             let tmp = fdir.join(format!("{}.tmp", f.id));
+            written.push(tmp.clone());
             std::fs::write(&tmp, f.packed())?;
+            written.push(path.clone());
             std::fs::rename(&tmp, &path)?;
         }
     }
@@ -75,14 +117,9 @@ pub fn save(dir: &Path, frames: &[Frame]) -> Result<()> {
             .collect(),
     };
     let tmp = dir.join("manifest.tmp");
+    written.push(tmp.clone());
     std::fs::write(&tmp, serde_json::to_vec(&m)?)?;
     std::fs::rename(&tmp, dir.join(MANIFEST))?;
-    let used: HashSet<String> = frames.iter().map(|f| format!("{}.lz4", f.id)).collect();
-    for e in std::fs::read_dir(&fdir)?.flatten() {
-        if !used.contains(&*e.file_name().to_string_lossy()) {
-            let _ = std::fs::remove_file(e.path());
-        }
-    }
     Ok(())
 }
 
@@ -257,6 +294,38 @@ mod tests {
         std::fs::remove_file(cur.join("frames").join(format!("{}.lz4", a.id))).unwrap();
         assert!(load(&cur).is_err());
         clear(&root);
+    }
+
+    #[test]
+    fn failed_save_removes_only_the_files_it_just_wrote() {
+        // 디스크가 차서 쓰다 실패하면, 이번에 새로 쓴 파일은 지워 공간을 돌려준다 (예전 저장본은 그대로)
+        let root = temp_root("failed");
+        let cur = current(&root);
+        let (old, a, b) = (frame(1, 10), frame(2, 10), frame(3, 10));
+        save(&cur, std::slice::from_ref(&old)).unwrap();
+        // b를 쓸 자리에 폴더를 만들어 두어 쓰기가 실패하게 한다
+        std::fs::create_dir_all(cur.join("frames").join(format!("{}.tmp", b.id))).unwrap();
+        assert!(save(&cur, &[old.clone(), a.clone(), b.clone()]).is_err());
+        assert!(!cur.join("frames").join(format!("{}.lz4", a.id)).exists());
+        assert!(cur.join("frames").join(format!("{}.lz4", old.id)).exists());
+        assert_eq!(load(&cur).unwrap().len(), 1);
+        clear(&root);
+    }
+
+    #[test]
+    fn room_check_counts_what_is_still_to_be_written() {
+        let root = temp_root("room");
+        let cur = current(&root);
+        let (a, b) = (frame(1, 10), frame(2, 10));
+        save(&cur, std::slice::from_ref(&a)).unwrap();
+        // 이미 쓴 a와, 시간만 바꾼 b 복사본은 세지 않는다
+        assert_eq!(pending_bytes(&cur, &[a.clone(), b.clone(), b.with_delay(50)]), b.packed_bytes() as u64);
+        clear(&root);
+        const GB: u64 = 1024 * 1024 * 1024;
+        // 남은 공간이 1.5GB라도 1GB를 써야 하면 1GB 여유가 안 남으니 쓰지 않는다
+        assert!(!has_room(Some(GB * 3 / 2), GB, GB));
+        assert!(has_room(Some(GB * 3), GB, GB));
+        assert!(has_room(None, GB, GB));
     }
 
     #[test]
