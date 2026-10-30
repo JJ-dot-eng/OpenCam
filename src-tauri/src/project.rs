@@ -117,6 +117,7 @@ impl Project {
         match self.undo.pop() {
             Some(prev) => {
                 self.redo.push(std::mem::replace(&mut self.frames, prev));
+                self.dirty = true;
                 self.revision += 1;
                 true
             }
@@ -128,6 +129,7 @@ impl Project {
         match self.redo.pop() {
             Some(next) => {
                 self.undo.push(std::mem::replace(&mut self.frames, next));
+                self.dirty = true;
                 self.revision += 1;
                 true
             }
@@ -906,6 +908,24 @@ mod tests {
         assert!(p.undo());
         p.load(vec![solid(1, 1, 0, 10)]);
         assert!(!p.can_undo() && !p.can_redo());
+    }
+
+    #[test]
+    fn undo_and_redo_after_saving_are_unsaved_changes() {
+        // 저장한 뒤 되돌리거나 다시 실행하면 저장한 파일과 달라지므로, 닫을 때 물어야 한다
+        let mut p = Project { undo_enabled: true, ..Default::default() };
+        p.load((0..3).map(|i| solid(1, 1, i, 10)).collect());
+        p.delete(&[0]);
+        p.dirty = false;
+        assert!(p.undo());
+        assert!(p.dirty);
+        p.dirty = false;
+        assert!(p.redo());
+        assert!(p.dirty);
+        // 되돌릴 것이 없으면 그대로
+        p.dirty = false;
+        assert!(!p.redo());
+        assert!(!p.dirty);
     }
 
     #[test]
