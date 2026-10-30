@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MANIFEST: &str = "manifest.json";
 const CURRENT: &str = "current";
@@ -56,11 +57,12 @@ pub fn current(root: &Path) -> PathBuf {
 /// 프레임 목록을 dir에 저장한다. 픽셀 파일은 프레임 번호마다 한 번만 쓰고,
 /// 목록 파일은 다 쓴 뒤 바꿔치기해서 쓰다가 끊겨도 이전 목록이 남는다. 그다음 안 쓰는 픽셀 파일을 지운다.
 /// 쓰다 실패하면(디스크 가득 참 등) 이번에 새로 쓴 파일은 지운다. 이전 목록은 그 파일들을 쓰지 않는다.
-pub fn save(dir: &Path, frames: &[Frame]) -> Result<()> {
+/// stop이 켜지면 프레임 사이에서 그만두고 오류를 돌려준다 (실패와 같이 정리한다).
+pub fn save(dir: &Path, frames: &[Frame], stop: &AtomicBool) -> Result<()> {
     let fdir = dir.join("frames");
     std::fs::create_dir_all(&fdir)?;
     let mut written = vec![];
-    if let Err(e) = write_frames(dir, &fdir, frames, &mut written) {
+    if let Err(e) = write_frames(dir, &fdir, frames, stop, &mut written) {
         for p in written {
             let _ = std::fs::remove_file(p);
         }
@@ -97,8 +99,17 @@ pub fn room_for(dir: &Path, frames: &[Frame], min_free: u64) -> bool {
 }
 
 /// 새 픽셀 파일과 목록 파일을 쓴다. 새로 쓴(또는 쓰다 만) 파일 경로는 written에 모은다.
-fn write_frames(dir: &Path, fdir: &Path, frames: &[Frame], written: &mut Vec<PathBuf>) -> Result<()> {
+fn write_frames(
+    dir: &Path,
+    fdir: &Path,
+    frames: &[Frame],
+    stop: &AtomicBool,
+    written: &mut Vec<PathBuf>,
+) -> Result<()> {
     for f in frames {
+        if stop.load(Ordering::SeqCst) {
+            bail!("자동 저장을 멈췄습니다");
+        }
         let path = fdir.join(format!("{}.lz4", f.id));
         if !path.exists() {
             let tmp = fdir.join(format!("{}.tmp", f.id));
@@ -229,6 +240,8 @@ pub fn free_space(dir: &Path) -> Option<u64> {
 mod tests {
     use super::*;
 
+    static GO: AtomicBool = AtomicBool::new(false);
+
     fn frame(v: u8, delay: u32) -> Frame {
         Frame::from_rgba(2, 1, &[v, 0, 0, 255, v, 0, 0, 255], delay)
     }
@@ -245,14 +258,14 @@ mod tests {
         let cur = current(&root);
         let a = frame(1, 10);
         let b = frame(2, 20);
-        save(&cur, &[a.clone(), b.clone(), a.with_delay(30)]).unwrap();
+        save(&cur, &[a.clone(), b.clone(), a.with_delay(30)], &GO).unwrap();
         // 같은 픽셀(시간만 바꾼 복사본)은 파일 하나
         assert_eq!(std::fs::read_dir(cur.join("frames")).unwrap().count(), 2);
         let back = load(&cur).unwrap();
         assert_eq!(back.iter().map(|f| f.delay_ms).collect::<Vec<_>>(), vec![10, 20, 30]);
         assert_eq!(back[1].rgba(), b.rgba());
         // b를 빼면 b 파일도 지운다
-        save(&cur, &[a.clone()]).unwrap();
+        save(&cur, &[a.clone()], &GO).unwrap();
         assert_eq!(std::fs::read_dir(cur.join("frames")).unwrap().count(), 1);
         clear(&root);
     }
@@ -263,7 +276,7 @@ mod tests {
         // 비정상 종료로 남은 작업 5개
         for i in 0..5 {
             let cur = current(&root);
-            save(&cur, &[frame(i, 100), frame(i + 1, 50)]).unwrap();
+            save(&cur, &[frame(i, 100), frame(i + 1, 50)], &GO).unwrap();
             adopt_leftover(&root);
             assert!(!cur.exists());
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -288,7 +301,7 @@ mod tests {
         let root = temp_root("corrupt");
         let cur = current(&root);
         let a = frame(1, 10);
-        save(&cur, &[a.clone()]).unwrap();
+        save(&cur, &[a.clone()], &GO).unwrap();
         std::fs::write(cur.join("frames").join(format!("{}.lz4", a.id)), b"garbage").unwrap();
         assert!(load(&cur).is_err());
         std::fs::remove_file(cur.join("frames").join(format!("{}.lz4", a.id))).unwrap();
@@ -302,12 +315,27 @@ mod tests {
         let root = temp_root("failed");
         let cur = current(&root);
         let (old, a, b) = (frame(1, 10), frame(2, 10), frame(3, 10));
-        save(&cur, std::slice::from_ref(&old)).unwrap();
+        save(&cur, std::slice::from_ref(&old), &GO).unwrap();
         // b를 쓸 자리에 폴더를 만들어 두어 쓰기가 실패하게 한다
         std::fs::create_dir_all(cur.join("frames").join(format!("{}.tmp", b.id))).unwrap();
-        assert!(save(&cur, &[old.clone(), a.clone(), b.clone()]).is_err());
+        assert!(save(&cur, &[old.clone(), a.clone(), b.clone()], &GO).is_err());
         assert!(!cur.join("frames").join(format!("{}.lz4", a.id)).exists());
         assert!(cur.join("frames").join(format!("{}.lz4", old.id)).exists());
+        assert_eq!(load(&cur).unwrap().len(), 1);
+        clear(&root);
+    }
+
+    #[test]
+    fn cancelled_save_stops_without_leaving_new_files() {
+        // 끝내기·녹화 틀로 돌아가기가 큰 자동 저장을 끝까지 기다리지 않게, 멈춤 신호를 보면 바로 그만둔다
+        let root = temp_root("cancel");
+        let cur = current(&root);
+        let old = frame(1, 10);
+        save(&cur, std::slice::from_ref(&old), &GO).unwrap();
+        let new: Vec<Frame> = (2..50).map(|v| frame(v, 10)).collect();
+        let stop = AtomicBool::new(true);
+        assert!(save(&cur, &[vec![old.clone()], new.clone()].concat(), &stop).is_err());
+        assert!(new.iter().all(|f| !cur.join("frames").join(format!("{}.lz4", f.id)).exists()));
         assert_eq!(load(&cur).unwrap().len(), 1);
         clear(&root);
     }
@@ -317,7 +345,7 @@ mod tests {
         let root = temp_root("room");
         let cur = current(&root);
         let (a, b) = (frame(1, 10), frame(2, 10));
-        save(&cur, std::slice::from_ref(&a)).unwrap();
+        save(&cur, std::slice::from_ref(&a), &GO).unwrap();
         // 이미 쓴 a와, 시간만 바꾼 b 복사본은 세지 않는다
         assert_eq!(pending_bytes(&cur, &[a.clone(), b.clone(), b.with_delay(50)]), b.packed_bytes() as u64);
         clear(&root);

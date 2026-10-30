@@ -44,6 +44,8 @@ struct AppState {
     snapshot_hotkey: Mutex<bool>,
     /// 작업 자동 저장 파일을 쓰는 동안 잡는다. true면 프로그램을 끝내는 중이라 더 쓰지 않는다.
     recovery_io: Mutex<bool>,
+    /// 쓰고 있는 자동 저장을 그만두라는 신호. 끝내기·녹화 틀로 돌아가기가 큰 저장을 끝까지 기다리지 않게 한다.
+    recovery_stop: std::sync::atomic::AtomicBool,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -520,6 +522,7 @@ fn write_new_recording_png(path: &Path, width: u32, height: u32, rgba: &[u8]) ->
 fn quit_app(app: AppHandle, state: State<AppState>) {
     // 정상 종료: 자동 저장해 둔 작업은 지운다 (남아 있으면 다음에 켤 때 비정상 종료로 본다)
     {
+        state.recovery_stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let mut stopped = state.recovery_io.lock();
         *stopped = true;
         recovery::clear(&recovery::current(&recovery::root()));
@@ -530,10 +533,13 @@ fn quit_app(app: AppHandle, state: State<AppState>) {
 /// 편집 창을 닫고 녹화 틀로 돌아간다 (편집 중인 프레임은 버린다)
 #[tauri::command]
 fn show_recorder(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
+    use std::sync::atomic::Ordering;
+    state.recovery_stop.store(true, Ordering::SeqCst);
     state.project.lock().load(vec![]);
     {
         let _io = state.recovery_io.lock();
         recovery::clear(&recovery::current(&recovery::root()));
+        state.recovery_stop.store(false, Ordering::SeqCst);
     }
     if let Some(m) = app.get_webview_window("main") {
         let _ = m.hide();
@@ -1403,7 +1409,10 @@ fn autosave_loop(app: AppHandle) {
                 let _ = app.emit("notice", msg.to_string());
             }
             continue;
-        } else if let Err(e) = recovery::save(&dir, &frames) {
+        } else if let Err(e) = recovery::save(&dir, &frames, &state.recovery_stop) {
+            if state.recovery_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                continue; // 끝내기·녹화 틀로 돌아가기가 멈추게 했다
+            }
             eprintln!("자동 저장 실패: {e:#}");
             if !warned {
                 warned = true;
@@ -1454,11 +1463,15 @@ async fn recovery_open(app: AppHandle, id: String) -> CmdResult<ProjectView> {
             true,
         );
         // 새로 저장하지 못하면 복구 목록에 그대로 남겨 둔다
-        let _io = state.recovery_io.lock();
+        let stopped = state.recovery_io.lock();
+        if *stopped {
+            return Ok(v); // 프로그램을 끝내는 중
+        }
         let frames = state.project.lock().frames.clone();
         let cur = recovery::current(&root);
         if !state.settings.lock().auto_recovery
-            || (recovery::room_for(&cur, &frames, AUTOSAVE_MIN_FREE) && recovery::save(&cur, &frames).is_ok())
+            || (recovery::room_for(&cur, &frames, AUTOSAVE_MIN_FREE)
+                && recovery::save(&cur, &frames, &state.recovery_stop).is_ok())
         {
             recovery::clear(&dir);
         }
@@ -1644,6 +1657,7 @@ pub fn run() {
             startup_notice: Mutex::new(None),
             snapshot_hotkey: Mutex::new(false),
             recovery_io: Mutex::new(false),
+            recovery_stop: std::sync::atomic::AtomicBool::new(false),
         })
         .register_asynchronous_uri_scheme_protocol("frame", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
