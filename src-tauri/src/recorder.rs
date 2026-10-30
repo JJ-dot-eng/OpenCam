@@ -67,6 +67,14 @@ impl Recorder {
     pub fn start(opts: RecordOptions, on_status: impl Fn(RecStatus) + Send + 'static) -> anyhow::Result<Self> {
         // 캡처 준비가 실패하면 바로 알려준다
         let capturer = Capturer::new(opts.region)?;
+        Self::spawn(capturer, opts, on_status)
+    }
+
+    fn spawn(
+        screen: impl Screen + Send + 'static,
+        opts: RecordOptions,
+        on_status: impl Fn(RecStatus) + Send + 'static,
+    ) -> anyhow::Result<Self> {
         let shared = Arc::new(Shared {
             frames: Mutex::new(vec![]),
             latest: Mutex::new(None),
@@ -87,7 +95,7 @@ impl Recorder {
         let s = shared.clone();
         let thread = std::thread::Builder::new()
             .name("opencam-recorder".into())
-            .spawn(move || run(capturer, opts, s, on_status))?;
+            .spawn(move || run(screen, opts, s, on_status))?;
         Ok(Recorder { shared, thread: Some(thread) })
     }
 
@@ -127,6 +135,25 @@ impl Recorder {
     }
 }
 
+/// 녹화할 화면. 실제로는 `Capturer`이고, 테스트에서는 가짜 화면을 넣는다.
+trait Screen {
+    fn region(&self) -> Rect;
+    fn set_region(&mut self, region: Rect) -> anyhow::Result<()>;
+    fn grab(&mut self, cursor: &CursorOptions) -> anyhow::Result<Vec<u8>>;
+}
+
+impl Screen for Capturer {
+    fn region(&self) -> Rect {
+        Capturer::region(self)
+    }
+    fn set_region(&mut self, region: Rect) -> anyhow::Result<()> {
+        Capturer::set_region(self, region)
+    }
+    fn grab(&mut self, cursor: &CursorOptions) -> anyhow::Result<Vec<u8>> {
+        Capturer::grab(self, cursor)
+    }
+}
+
 /// 직전 프레임이 화면에 보인 시간만큼 delay를 늘린다
 fn extend_last(s: &Shared, dt: Duration) {
     if let Some(prev) = s.frames.lock().last_mut() {
@@ -134,7 +161,7 @@ fn extend_last(s: &Shared, dt: Duration) {
     }
 }
 
-fn run(mut cap: Capturer, mut opts: RecordOptions, s: Arc<Shared>, on_status: impl Fn(RecStatus)) {
+fn run(mut cap: impl Screen, mut opts: RecordOptions, s: Arc<Shared>, on_status: impl Fn(RecStatus)) {
     let fps = opts.fps.clamp(1, 100);
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next = Instant::now();
@@ -150,6 +177,8 @@ fn run(mut cap: Capturer, mut opts: RecordOptions, s: Arc<Shared>, on_status: im
     let mut bytes = 0usize;
     let mut last_report = Instant::now() - Duration::from_secs(1);
     let mut stop_reason = None;
+    // 편집용 마지막 프레임이 아직 지금 화면인가. 편집용 프레임을 그만 모은 뒤로는 그 프레임 시간을 늘리지 않는다.
+    let mut extend = true;
 
     while !s.stop.load(Ordering::SeqCst) {
         if let Some(r) = s.region.lock().take()
@@ -164,7 +193,9 @@ fn run(mut cap: Capturer, mut opts: RecordOptions, s: Arc<Shared>, on_status: im
             // 일시정지 직전까지의 시간만 넣고, 쉬는 시간은 프레임 시간에 넣지 않는다
             if let Some(t) = last_tick.take() {
                 let dt = t.elapsed();
-                extend_last(&s, dt);
+                if extend {
+                    extend_last(&s, dt);
+                }
                 recorded += dt;
             }
             std::thread::sleep(Duration::from_millis(15));
@@ -194,7 +225,9 @@ fn run(mut cap: Capturer, mut opts: RecordOptions, s: Arc<Shared>, on_status: im
         *s.latest.lock() = Some((r.w as u32, r.h as u32, px.clone()));
         if let Some(t) = last_tick.replace(now) {
             let dt = now.duration_since(t);
-            extend_last(&s, dt);
+            if extend {
+                extend_last(&s, dt);
+            }
             recorded += dt;
         }
         if let Some(d) = &direct {
@@ -212,6 +245,8 @@ fn run(mut cap: Capturer, mut opts: RecordOptions, s: Arc<Shared>, on_status: im
         if !same {
             last_px = Some(px);
         }
+        // 이번 화면까지는 편집용 프레임에 담겼다 (아래에서 한도에 닿아도 다음 캡처까지는 보인 시간이다)
+        extend = keep;
 
         if let Some(max) = opts.max_ms
             && recorded.as_millis() as u64 >= max
@@ -236,7 +271,7 @@ fn run(mut cap: Capturer, mut opts: RecordOptions, s: Arc<Shared>, on_status: im
     // 마지막 프레임: 멈춘 시점까지 보인 시간, 최소 한 칸
     if let Some(t) = last_tick {
         let dt = t.elapsed();
-        if keep {
+        if extend {
             extend_last(&s, dt);
         }
         recorded += dt;
@@ -282,4 +317,63 @@ fn report(
         st.clone()
     };
     on_status(st);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 캡처할 때마다 색이 바뀌는 4×4 가짜 화면
+    struct FakeScreen(u8);
+
+    impl Screen for FakeScreen {
+        fn region(&self) -> Rect {
+            Rect { x: 0, y: 0, w: 4, h: 4 }
+        }
+        fn set_region(&mut self, _: Rect) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn grab(&mut self, _: &CursorOptions) -> anyhow::Result<Vec<u8>> {
+            self.0 = self.0.wrapping_add(1);
+            Ok(vec![self.0; 64])
+        }
+    }
+
+    #[test]
+    fn frames_kept_before_memory_limit_do_not_absorb_the_rest_of_direct_recording() {
+        if crate::export::find_ffmpeg().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("opencam_direct_limit_{}", std::process::id()));
+        let opts = RecordOptions {
+            region: Rect { x: 0, y: 0, w: 4, h: 4 },
+            fps: 50,
+            skip_same_frame: false,
+            max_ms: Some(600),
+            max_bytes: 1, // 첫 프레임에서 바로 한도
+            cursor: CursorOptions {
+                draw: false,
+                highlight: false,
+                highlight_color: 0,
+                click_fx: false,
+                left_color: 0,
+                right_color: 0,
+            },
+            direct: Some(Mp4Stream::start(&dir.join("d.mp4"), 4, 4, 50, 80).unwrap()),
+            drop_frames_after_limit: true,
+        };
+        let rec = Recorder::spawn(FakeScreen(0), opts, |_| {}).unwrap();
+        // 최대 녹화 시간으로 스스로 멈출 때까지 기다린다
+        let t = Instant::now();
+        while rec.status().recording && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let result = rec.stop();
+        assert!(result.dropped);
+        assert!(matches!(result.direct, Some(Ok(_))));
+        assert_eq!(result.frames.len(), 1);
+        // 예전에는 편집용 프레임을 그만 모은 뒤의 녹화 시간(약 0.6초)이 모두 이 프레임에 더해졌다
+        assert!(result.frames[0].delay_ms < 300, "{}ms", result.frames[0].delay_ms);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
