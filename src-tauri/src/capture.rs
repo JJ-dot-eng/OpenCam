@@ -45,6 +45,8 @@ struct Output {
     staging: Option<ID3D11Texture2D>,
     staging_desc: Option<(u32, u32, DXGI_FORMAT)>,
     got_first: bool,
+    /// 모니터가 돌아간 정도 (90° 단위, 0~3). 돌린 모니터의 화면 이미지는 회전 전 방향으로 온다.
+    quarter: u8,
 }
 
 pub struct CursorOptions {
@@ -130,6 +132,7 @@ impl Capturer {
                         staging: None,
                         staging_desc: None,
                         got_first: false,
+                        quarter: 0,
                     };
                     o.open()?;
                     outputs.push(o);
@@ -218,6 +221,12 @@ impl Output {
                 Err(_) => self.output.DuplicateOutput(&self.device),
             }
             .context("DuplicateOutput failed")?;
+            self.quarter = match dup.GetDesc().Rotation {
+                DXGI_MODE_ROTATION_ROTATE90 => 1,
+                DXGI_MODE_ROTATION_ROTATE180 => 2,
+                DXGI_MODE_ROTATION_ROTATE270 => 3,
+                _ => 0,
+            };
             self.dup = Some(dup);
         }
         self.got_first = false;
@@ -266,26 +275,81 @@ impl Output {
                 let hdr = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
                 let bpp = if hdr { 8 } else { 4 };
                 let src = std::slice::from_raw_parts(map.pData as *const u8, (map.RowPitch * desc.Height) as usize);
-                let sx = (part.x - self.bounds.x) as usize;
-                let dx = (part.x - region.x) as usize;
-                for row in 0..part.h as usize {
-                    let sy = (part.y - self.bounds.y) as usize + row;
-                    let dy = (part.y - region.y) as usize + row;
-                    let s = &src[sy * map.RowPitch as usize + sx * bpp..][..part.w as usize * bpp];
-                    let d = &mut canvas[(dy * region.w as usize + dx) * 4..][..part.w as usize * 4];
-                    if hdr {
-                        hdr_row_to_bgra(s, d);
-                    } else {
-                        d.copy_from_slice(s);
-                    }
-                }
+                let copied = copy_part(
+                    &Texture { px: src, pitch: map.RowPitch as usize, w: desc.Width as usize, h: desc.Height as usize, bpp, hdr },
+                    self.quarter,
+                    (self.bounds.w as usize, self.bounds.h as usize),
+                    ((part.x - self.bounds.x) as usize, (part.y - self.bounds.y) as usize),
+                    (part.w as usize, part.h as usize),
+                    canvas,
+                    region.w as usize,
+                    ((part.x - region.x) as usize, (part.y - region.y) as usize),
+                );
                 self.context.Unmap(staging, 0);
-                Ok(true)
+                copied.map(|()| true)
             })();
             let _ = dup.ReleaseFrame();
             result
         }
     }
+}
+
+/// Duplication으로 받은 화면 이미지 (회전 전 방향)
+struct Texture<'a> {
+    px: &'a [u8],
+    pitch: usize,
+    w: usize,
+    h: usize,
+    /// 픽셀당 바이트 (HDR이면 8)
+    bpp: usize,
+    hdr: bool,
+}
+
+/// 모니터 안 from 위치의 size 부분을 캔버스(canvas_w 폭)의 to 위치로 옮긴다.
+/// 돌린 모니터(quarter)는 이미지가 회전 전 방향이라 좌표를 돌려서 읽는다.
+/// 이미지 크기가 모니터와 맞지 않으면 범위 밖을 읽지 않고 오류를 돌려준다.
+#[allow(clippy::too_many_arguments)]
+fn copy_part(
+    tex: &Texture,
+    quarter: u8,
+    (mw, mh): (usize, usize),
+    (fx, fy): (usize, usize),
+    (w, h): (usize, usize),
+    canvas: &mut [u8],
+    canvas_w: usize,
+    (tx, ty): (usize, usize),
+) -> Result<()> {
+    // 90°·270°라고 하는데 이미지가 이미 화면 방향으로 왔으면 돌리지 않는다
+    let quarter = if quarter % 2 == 1 && (tex.w, tex.h) == (mw, mh) && mw != mh { 0 } else { quarter % 4 };
+    let (need_w, need_h) = if quarter % 2 == 1 { (mh, mw) } else { (mw, mh) };
+    if tex.w < need_w
+        || tex.h < need_h
+        || tex.pitch < tex.w * tex.bpp
+        || tex.px.len() < tex.pitch * tex.h
+        || fx + w > mw
+        || fy + h > mh
+    {
+        return Err(anyhow!("화면 이미지 크기({}×{})가 모니터({mw}×{mh})와 맞지 않습니다", tex.w, tex.h));
+    }
+    let put = |s: &[u8], d: &mut [u8]| if tex.hdr { hdr_row_to_bgra(s, d) } else { d.copy_from_slice(s) };
+    for row in 0..h {
+        let d = &mut canvas[((ty + row) * canvas_w + tx) * 4..][..w * 4];
+        let y = fy + row;
+        if quarter == 0 {
+            put(&tex.px[y * tex.pitch + fx * tex.bpp..][..w * tex.bpp], d);
+            continue;
+        }
+        for (col, dp) in d.chunks_exact_mut(4).enumerate() {
+            let x = fx + col;
+            let (sx, sy) = match quarter {
+                1 => (y, mw - 1 - x),
+                2 => (mw - 1 - x, mh - 1 - y),
+                _ => (mh - 1 - y, x),
+            };
+            put(&tex.px[sy * tex.pitch + sx * tex.bpp..][..tex.bpp], dp);
+        }
+    }
+    Ok(())
 }
 
 /// scRGB(선형, 1.0 = 80nit 흰색) FP16 → sRGB 8비트
@@ -415,5 +479,66 @@ fn draw_cursor(canvas: &mut [u8], region: Rect, opt: &CursorOptions) {
         let _ = DeleteObject(dib.into());
         let _ = DeleteDC(mem);
         ReleaseDC(None, screen);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 화면(mw×mh)의 픽셀 (x, y)를 알아볼 수 있는 값으로 채운 BGRA
+    fn screen_px(x: usize, y: usize) -> [u8; 4] {
+        [x as u8, y as u8, 7, 255]
+    }
+
+    /// 모니터를 quarter만큼 돌렸을 때 Duplication이 주는 이미지(회전 전 방향)를 만든다.
+    /// Microsoft의 Desktop Duplication 예제가 이미지 → 화면으로 옮길 때 쓰는 식을 그대로 따른다.
+    fn rotated_texture(mw: usize, mh: usize, quarter: u8) -> (usize, usize, Vec<u8>) {
+        let (tw, th) = if quarter % 2 == 1 { (mh, mw) } else { (mw, mh) };
+        let mut px = vec![0u8; tw * th * 4];
+        for ty in 0..th {
+            for tx in 0..tw {
+                let (x, y) = match quarter {
+                    1 => (mw - 1 - ty, tx),
+                    2 => (mw - 1 - tx, mh - 1 - ty),
+                    3 => (ty, mh - 1 - tx),
+                    _ => (tx, ty),
+                };
+                px[(ty * tw + tx) * 4..][..4].copy_from_slice(&screen_px(x, y));
+            }
+        }
+        (tw, th, px)
+    }
+
+    #[test]
+    fn rotated_monitors_are_read_upright() {
+        // 세로 모니터(가로 3, 세로 5)의 (1, 1)부터 2×3 부분
+        let (mw, mh) = (3, 5);
+        for quarter in 0..4 {
+            let (tw, th, px) = rotated_texture(mw, mh, quarter);
+            let tex = Texture { px: &px, pitch: tw * 4, w: tw, h: th, bpp: 4, hdr: false };
+            let mut canvas = vec![0u8; 2 * 3 * 4];
+            copy_part(&tex, quarter, (mw, mh), (1, 1), (2, 3), &mut canvas, 2, (0, 0)).unwrap();
+            for y in 0..3 {
+                for x in 0..2 {
+                    assert_eq!(&canvas[(y * 2 + x) * 4..][..4], &screen_px(1 + x, 1 + y), "회전 {quarter}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn size_mismatch_is_an_error_not_a_crash() {
+        // 예전에는 세로 모니터에서 가로 방향 이미지를 세로 크기로 읽어 범위를 벗어나 프로그램이 꺼졌다
+        let (tw, th, px) = rotated_texture(3, 5, 1);
+        let tex = Texture { px: &px, pitch: tw * 4, w: tw, h: th, bpp: 4, hdr: false };
+        let mut canvas = vec![0u8; 4 * 4 * 4];
+        assert!(copy_part(&tex, 0, (4, 4), (0, 0), (4, 4), &mut canvas, 4, (0, 0)).is_err());
+        // 회전 정보가 있어도 이미지가 이미 화면 방향이면 그대로 읽는다
+        let (tw, th, px) = rotated_texture(3, 5, 0);
+        let tex = Texture { px: &px, pitch: tw * 4, w: tw, h: th, bpp: 4, hdr: false };
+        let mut canvas = vec![0u8; 3 * 5 * 4];
+        copy_part(&tex, 1, (3, 5), (0, 0), (3, 5), &mut canvas, 3, (0, 0)).unwrap();
+        assert_eq!(&canvas[(4 * 3 + 2) * 4..][..4], &screen_px(2, 4));
     }
 }
