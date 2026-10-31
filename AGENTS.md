@@ -2,9 +2,23 @@
 
 이 저장소에서 일하는 AI 도구(코딩 에이전트)가 먼저 읽는 파일이다. 사람용 소개는 [README.md](README.md).
 
+## 여러 AI가 함께 일하는 규칙
+
+이 저장소는 여러 AI가 번갈아 맡는다. 아래 순서를 지킨다.
+
+- **시작할 때**: 이 파일을 먼저 읽고 따른 뒤 [HANDOFF.md](HANDOFF.md)를 이어서 읽는다.
+  `git status`와 최근 커밋 10개를 확인한다. 커밋되지 않은 변경이 있으면 손대지 말고 누가 남긴 것인지 사용자에게 묻는다.
+- **한 번에 한 AI만** 작업한다. 다른 AI가 작업 중인 것 같으면 멈추고 사용자에게 묻는다.
+- **끝낼 때**: [HANDOFF.md](HANDOFF.md)를 덮어써서 갱신하고(갱신 날짜와 내 이름, 끝난 일, 남은 일, 사용자가 정한 것),
+  작업 변경과 함께 커밋한다. 일지처럼 아래로 쌓지 않는다. 자세한 기록은 [docs/TODO.md](docs/TODO.md)에 남긴다.
+- 다른 AI(예: Claude)가 맡긴 하위 작업을 하는 중이면 위의 시작·끝 절차 대신 맡긴 AI의 지시를 따른다.
+  HANDOFF.md는 고치지 말고 결과를 맡긴 AI에게 보고한다.
+- 이 파일(AGENTS.md)의 규칙은 사용자 허락 없이 바꾸지 않는다.
+
 ## 먼저 읽을 것
 
-- [docs/TODO.md](docs/TODO.md): 지금까지 한 일, 보류한 버그, 다음 방향. **가장 최신 상태는 여기.**
+- [HANDOFF.md](HANDOFF.md): 바로 앞 AI가 남긴 짧은 인계. 끝난 일, 남은 일, 사용자가 정한 것.
+- [docs/TODO.md](docs/TODO.md): 지금까지 한 일, 보류한 버그, 다음 방향을 자세히 적은 기록.
 - [docs/next-features.md](docs/next-features.md): 다음 기능 후보와 화면 배치안 (2026-10-29 작성, 맨 위 "지금 상태" 참고)
 - [SPEC.md](SPEC.md): 기능 전체 목록과 동작 규칙
 
@@ -35,7 +49,7 @@ npx tsc --noEmit                           # 화면 코드 타입 검사
 - 확인·입력 창은 `window.confirm`·`prompt`를 쓰지 말고 `src/ask.tsx`의 `confirmAsk`·`promptAsk`·`alertAsk`를 쓴다.
   이 앱의 웹뷰에서는 `window.confirm`이 창을 띄우지 않고 바로 "예"를 돌려준다.
 - 버전을 올릴 때는 `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` 세 곳을 같이 바꾼다. 릴리스 순서는 README "릴리스 만들기".
-- 일을 마치면 [docs/TODO.md](docs/TODO.md)에 한 일, 실제 앱에서 확인한 것과 못 한 것을 적는다.
+- 일을 마치면 [docs/TODO.md](docs/TODO.md)에 한 일, 실제 앱에서 확인한 것과 못 한 것을 적고, HANDOFF.md를 갱신한다.
 
 ## 알아 둘 것
 
