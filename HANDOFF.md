@@ -10,12 +10,12 @@
   - PR #5: 큰 PNG·GIF를 메모리 한도 전에 통째로 푸는 것(#2), 동영상 프레임 크기(w*h*4)를 u32로 계산하다 넘치는 문제(#7).
 - 정적 검토 버그 2단계: 세 갈래로 나눠 PR을 올림.
   - PR-C(이 PR #7, 브랜치 `fix/append-race`): 파일을 붙이는 중에 새 녹화·열기·새로 만들기를 누르면 결과가 다른 작업에 붙을 수 있던 것(#1), 아주 빨리 두 번 놓으면 붙이기가 겹쳐 돌던 것(#15). 붙이는 동안 프로젝트를 바꾸는 버튼을 막고, 붙이기마다 작업 번호를 붙여 늦게 온 옛 결과는 버린다(`Editor.tsx`, `lib.rs`).
-  - PR-D(브랜치 `fix/video-import-partial`, 진행 중): ffmpeg가 중간에 실패해도 앞부분만 경고 없이 들어오는 것(#4), 길이 정보가 없는(Duration: N/A) 동영상을 못 여는 것(#14).
+  - PR-D(PR #8, 브랜치 `fix/video-import-partial`, PR 열림): ffmpeg가 중간에 실패해도 앞부분만 경고 없이 들어오는 것(#4), 길이 정보가 없는(Duration: N/A) 동영상을 못 여는 것(#14).
   - PR-E(PR #6, 브랜치 `fix/gif-transparent-disposal`, PR 열림): GIF에서 투명해진 부분에 앞 프레임이 비치는 것(#5).
 - GitHub Actions CI가 PR마다 Windows에서 타입 검사·노드 테스트·화면 빌드·Rust 빌드·cargo test를 돌린다.
 
 ## 남은 일
-- PR-C·PR-D·PR-E의 CI 결과를 보고 main에 합칠지 사용자가 정한다. PR-D가 화면 쪽 연결이 더 필요하다고 하면 필요 시 이어서 한다.
+- PR-C·PR-D·PR-E의 CI 결과를 보고 main에 합칠지 사용자가 정한다. PR-D는 기존 경고 통로(Loaded.warning)로 화면 연결까지 완료.
 - 정적 검토 버그 3단계: #12 편집이 프로젝트 잠금을 쥔 채 rayon을 기다리고 썸네일 요청(`frame_png`)이 rayon 안에서 잠금을 기다려 멈출 수 있음(의심, `lib.rs`·`project.rs`).
 - 낮음 후보: APNG 프레임 시간 65.5초 잘림, GIF 시간 보정이 APNG·WebP에도 적용됨, 시간 합 u32 넘침, 클립보드 삽입 이미지 Blob URL 미해제, 동영상 붙이기 메모리 한도 계산 오차, 진행률 99% 정체.
 - PC에서 Windows 앱 동작 확인: 파일 끌어 놓기(붙이는 중 버튼 막힘, 빨리 두 번 놓기 포함)·ffmpeg 오류 상황, 세로 모니터 녹화, 복구 카드의 복구 동작, 0.1.7의 GIF·PNG 저장.
