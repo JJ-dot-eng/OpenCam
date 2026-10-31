@@ -1,27 +1,26 @@
 # 인계
 
-갱신: 2026-10-31, Codex 담당
+갱신: 2026-10-31, Codex 담당 (OpenCam 담당 위임)
 
 자세한 기록은 [docs/TODO.md](docs/TODO.md).
 
 ## 끝난 일
-- 정적 검토 버그 1단계: main에 합치고 0.1.7로 릴리스함.
-  - PR #4: GIF 저장의 마지막 쓰기·비우기 오류를 버려 실패를 저장됨으로 보이던 것(#3), PNG 연속 저장의 결과 경로가 실제 파일(`_0001`)과 달라 크기·지우기·덮어쓰기 확인이 틀리던 것(#6).
-  - PR #5: 큰 PNG·GIF를 메모리 한도 전에 통째로 푸는 것(#2), 동영상 프레임 크기(w*h*4)를 u32로 계산하다 넘치는 문제(#7).
-- 정적 검토 버그 2단계: 세 갈래로 나눠 PR을 올림.
-  - PR-C(이 PR #7, 브랜치 `fix/append-race`): 파일을 붙이는 중에 새 녹화·열기·새로 만들기를 누르면 결과가 다른 작업에 붙을 수 있던 것(#1), 아주 빨리 두 번 놓으면 붙이기가 겹쳐 돌던 것(#15). 붙이는 동안 프로젝트를 바꾸는 버튼을 막고, 붙이기마다 작업 번호를 붙여 늦게 온 옛 결과는 버린다(`Editor.tsx`, `lib.rs`).
-  - PR-D(PR #8, 브랜치 `fix/video-import-partial`, PR 열림): ffmpeg가 중간에 실패해도 앞부분만 경고 없이 들어오는 것(#4), 길이 정보가 없는(Duration: N/A) 동영상을 못 여는 것(#14).
-  - PR-E(PR #6, 브랜치 `fix/gif-transparent-disposal`, PR 열림): GIF에서 투명해진 부분에 앞 프레임이 비치는 것(#5).
+
+- PR #4·#5를 main에 합치고 0.1.7로 릴리스함.
+- PR #6(GIF 투명 잔상)·#7(붙이기 겹침·작업 변경)·#8(동영상 일부만 읽음 경고·길이 없는 동영상)을 main에 합치고 0.1.8로 릴리스함.
 - GitHub Actions CI가 PR마다 Windows에서 타입 검사·노드 테스트·화면 빌드·Rust 빌드·cargo test를 돌린다.
+- PR #10(`test/e2e-media`, 열림·아직 안 합침): 창 없는 Rust 미디어 e2e 테스트 8개 추가. PNG·투명 PNG·투명 GIF·MP4·길이 정보 없는 WebM·끝이 잘린 AVI 열기 → 붙이기 → GIF·WebP·APNG·MP4·WebM·PNG 연속 저장 → 다시 읽기를 확인한다. Windows CI에서 cargo test 112 → 120개 통과, 무시한 테스트 없음. ffmpeg가 없으면 CI 실패(`OPENCAM_REQUIRE_FFMPEG`). 실제 앱에서만 확인할 항목은 [docs/real-app-checklist.md](docs/real-app-checklist.md)에 적었다.
+- PR #9(`test/ui-logic`, 열림·아직 안 합침): 끌어 놓기 처리 판단·붙이기 잠금 노드 테스트 추가(13 → 49개). 동작을 바꾸지 않고 `Editor.tsx`의 순수 로직을 `src/dropHandling.ts`·`src/appendLock.ts`로 옮겼다.
+- PR #9·#10 모두 CI 통과. 테스트에서 새 버그는 찾지 못했다.
 
 ## 남은 일
-- PR-C·PR-D·PR-E의 CI 결과를 보고 main에 합칠지 사용자가 정한다. PR-D는 기존 경고 통로(Loaded.warning)로 화면 연결까지 완료.
-- 완료(PR #8): #8 머지 전에 lib.rs append_files가 메모리 한도일 때만 뒤 파일을 건너뛰도록 고침(일부만 읽음 경고는 계속 진행)
+
+- PR #9·#10을 main에 합칠지 사용자가 정한다.
+- Windows PC에서 [docs/real-app-checklist.md](docs/real-app-checklist.md) 항목을 확인한다. 세로 모니터 녹화, 복구 카드의 복구 동작, 0.1.7의 GIF·PNG 저장도 실제 앱 확인이 남아 있다.
 - 정적 검토 버그 3단계: #12 편집이 프로젝트 잠금을 쥔 채 rayon을 기다리고 썸네일 요청(`frame_png`)이 rayon 안에서 잠금을 기다려 멈출 수 있음(의심, `lib.rs`·`project.rs`).
 - 낮음 후보: APNG 프레임 시간 65.5초 잘림, GIF 시간 보정이 APNG·WebP에도 적용됨, 시간 합 u32 넘침, 클립보드 삽입 이미지 Blob URL 미해제, 동영상 붙이기 메모리 한도 계산 오차, 진행률 99% 정체.
-- PC에서 Windows 앱 동작 확인: 파일 끌어 놓기(붙이는 중 버튼 막힘, 빨리 두 번 놓기 포함)·ffmpeg 오류 상황, 세로 모니터 녹화, 복구 카드의 복구 동작, 0.1.7의 GIF·PNG 저장.
 - 보류한 버그: 정전 시 복구 파일 동기화, 녹화 틀 옮길 때 잠깐 끊김, 저장 결과에 단축키 오류.
-- AGENTS.md의 Rust 테스트 수(75)는 오래되었으나 사용자 허락 없이 고치지 않음.
+- AGENTS.md의 Rust 테스트 수(75)는 오래되었다(PR #10 포함 120개). 사용자 허락 없이 고치지 않음.
 
 ## 사용자가 정한 것
 - 새 기능은 바로 추가하지 않고 직접 사용하거나 사용자 반응을 본 뒤 정한다.

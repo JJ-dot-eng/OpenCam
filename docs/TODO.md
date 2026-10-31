@@ -6,7 +6,7 @@
 
 ## 지금까지 된 것
 
-- [x] 창 없는 미디어 e2e 테스트 추가 (2026-10-31, Codex, 브랜치 test/e2e-media): PNG·투명 PNG·투명 GIF·MP4·길이 정보 없는 WebM·일부가 잘린 AVI를 임시 폴더에 만들고, 열기 → 기존 프로젝트에 붙이기 → GIF·WebP·APNG·MP4·WebM·PNG 연속 저장 → 다시 읽기를 확인하는 Rust 테스트 6개를 추가했다. 장수·크기·시간·대표 픽셀·투명 여백·GIF 잔상·MP4 검정 합성을 검사한다. 붙이기 겹침·작업 변경 거부와 실제 파일의 메모리 한도 검사 2개도 추가했다(총 8개, 무시한 테스트 없음). CI의 Rust 테스트는 ffmpeg가 없으면 실패한다. 확인한 것: Linux ffmpeg 7.1에서 테스트 파일 생성, WebM의 Duration: N/A와 길이 탐색, 잘린 AVI의 부분 읽기·오류 출력, MP4 검정 합성·WebM 알파·대표 색. Pillow의 libwebp로 같은 그림의 WebP 장수·시간·대표 색도 확인했다. 확인 못 한 것: Rust 컴파일·cargo test(이 환경에서는 실행하지 않음), 실제 Windows 앱. 실제 앱에서 볼 항목은 [real-app-checklist.md](real-app-checklist.md)에 적었다. 제품 동작·의존성·버전은 바꾸지 않았다.
+- [x] 창 없는 미디어 e2e 테스트 추가 (2026-10-31, Codex, 브랜치 test/e2e-media): PNG·투명 PNG·투명 GIF·MP4·길이 정보 없는 WebM·일부가 잘린 AVI를 임시 폴더에 만들고, 열기 → 기존 프로젝트에 붙이기 → GIF·WebP·APNG·MP4·WebM·PNG 연속 저장 → 다시 읽기를 확인하는 Rust 테스트 6개를 추가했다. 장수·크기·시간·대표 픽셀·투명 여백·GIF 잔상·MP4 검정 합성을 검사한다. 붙이기 겹침·작업 변경 거부와 실제 파일의 메모리 한도 검사 2개도 추가했다(총 8개, 무시한 테스트 없음). CI의 Rust 테스트는 ffmpeg가 없으면 실패한다. 확인한 것: Linux ffmpeg 7.1에서 테스트 파일 생성, WebM의 Duration: N/A와 길이 탐색, 잘린 AVI의 부분 읽기·오류 출력, MP4 검정 합성·WebM 알파·대표 색. Pillow의 libwebp로 같은 그림의 WebP 장수·시간·대표 색도 확인했다. Windows CI(GitHub Actions)에서 Rust 빌드와 cargo test를 통과했다(새 테스트 8개 모두 포함, 112 → 120개). 확인 못 한 것: 실제 Windows 앱. 실제 앱에서 볼 항목은 [real-app-checklist.md](real-app-checklist.md)에 적었다. 제품 동작·의존성·버전은 바꾸지 않았다.
 - **1단계 핵심**: 녹화 틀(구멍 뚫린 창), 녹화/일시정지, 편집 창, 프레임 편집 전부, 자르기·크기/회전, 되돌리기, 저장(GIF·WebP·APNG·MP4·WebM·PNG), 설정 창
 - **3단계 전부**: 파일 열기(GIF·WebP·APNG·동영상 구간·이미지 여러 장, Ctrl+O, 끌어 놓기), 새 빈 영상, 콜라주(G), 파일 관리,
   클립보드, 프레임 이미지로 저장·내보내기(Ctrl+Shift+E), 2·3·4배 고품질 확대, GIF 특정 색 보호, 설정 내보내기/가져오기,
