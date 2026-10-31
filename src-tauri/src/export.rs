@@ -160,7 +160,7 @@ fn draw_progress(px: &mut [u8], w: u32, h: u32, pos: f32, s: &Settings) {
     }
 }
 
-pub fn export(frames: &[Frame], path: &Path, opt: &ExportOptions, s: &Settings, progress: Progress) -> Result<()> {
+pub fn export(frames: &[Frame], path: &Path, opt: &ExportOptions, s: &Settings, progress: Progress) -> Result<Vec<PathBuf>> {
     if frames.is_empty() {
         bail!("저장할 프레임이 없습니다");
     }
@@ -176,8 +176,9 @@ pub fn export(frames: &[Frame], path: &Path, opt: &ExportOptions, s: &Settings, 
         Format::Webp => webp(&frames, path, opt.quality, s, progress),
         Format::Apng => apng(&frames, path, s, progress),
         Format::Mp4 | Format::Webm | Format::Avif => video(&frames, path, opt.format, opt.quality, s, progress),
-        Format::Png => png_sequence(&frames, path, progress),
-    }
+        Format::Png => return png_sequence(&frames, path, progress),
+    }?;
+    Ok(vec![path.to_path_buf()])
 }
 
 /// 저장하지 않고 예상 크기만 계산 (임시 폴더에 써 보고 지운다).
@@ -283,8 +284,20 @@ fn gif_direct(
     s: &Settings,
     progress: Progress,
 ) -> Result<()> {
-    let (w, h) = (frames[0].width as usize, frames[0].height as usize);
     let file = BufWriter::new(std::fs::File::create(path)?);
+    write_gif(frames, file, quality, colors, tol, s, progress)
+}
+
+fn write_gif<W: Write>(
+    frames: &[Frame],
+    file: W,
+    quality: u8,
+    colors: &[[u8; 3]],
+    tol: u8,
+    s: &Settings,
+    progress: Progress,
+) -> Result<()> {
+    let (w, h) = (frames[0].width as usize, frames[0].height as usize);
     let mut enc = gif::Encoder::new(file, w as u16, h as u16, &[])?;
     match plays(s.gif_finite_loop, s.gif_loop_count) {
         Some(n) => enc.set_repeat(gif::Repeat::Finite(n - 1))?,
@@ -388,6 +401,7 @@ fn gif_direct(
             progress(done as f32 / frames.len() as f32, "GIF 인코딩 중");
         }
     }
+    enc.into_inner()?.flush()?;
     Ok(())
 }
 
@@ -825,17 +839,33 @@ fn composite_over(px: &mut [u8], rgb: [u8; 3]) {
 }
 
 /// name.png → name_0001.png, name_0002.png ...
-fn png_sequence(frames: &[Frame], path: &Path, progress: Progress) -> Result<()> {
+pub fn png_sequence_paths(path: &Path, count: usize) -> Vec<PathBuf> {
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "frame".into());
     let dir = path.parent().unwrap_or(Path::new("."));
+    (1..=count).map(|i| dir.join(format!("{stem}_{i:04}.png"))).collect()
+}
+
+pub fn planned_paths(frames: &[Frame], path: &Path, opt: &ExportOptions, s: &Settings) -> Vec<PathBuf> {
+    if opt.format != Format::Png {
+        return vec![path.to_path_buf()];
+    }
+    // 장수만 필요하므로 크기 조절과 진행 막대 그리기는 건너뛴다.
+    let mut opt = opt.clone();
+    opt.resize_percent = 100;
+    opt.embed_progress = false;
+    png_sequence_paths(path, prepare(frames, &opt, s).len())
+}
+
+fn png_sequence(frames: &[Frame], path: &Path, progress: Progress) -> Result<Vec<PathBuf>> {
+    let paths = png_sequence_paths(path, frames.len());
     let done = std::sync::atomic::AtomicUsize::new(0);
-    frames.par_iter().enumerate().try_for_each(|(i, f)| -> Result<()> {
-        let p = dir.join(format!("{stem}_{:04}.png", i + 1));
-        write_png(&p, f.width, f.height, &f.rgba())?;
+    frames.par_iter().zip(paths.par_iter()).try_for_each(|(f, p)| -> Result<()> {
+        write_png(p, f.width, f.height, &f.rgba())?;
         let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         progress(n as f32 / frames.len() as f32, "PNG 저장 중");
         Ok(())
-    })
+    })?;
+    Ok(paths)
 }
 
 pub fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
@@ -891,6 +921,91 @@ mod tests {
             protect_colors: vec![],
             gif_fit_50fps: false,
         }
+    }
+
+    #[derive(Default)]
+    struct FailingWriter {
+        bytes: Vec<u8>,
+        limit: Option<usize>,
+        fail_flush: bool,
+        flushed: bool,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let n = self.limit.map_or(buf.len(), |limit| buf.len().min(limit.saturating_sub(self.bytes.len())));
+            if n == 0 && !buf.is_empty() {
+                return Err(std::io::Error::other("마지막 쓰기 실패"));
+            }
+            self.bytes.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed = true;
+            if self.fail_flush {
+                Err(std::io::Error::other("마지막 비우기 실패"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn gif_returns_trailer_write_error() {
+        let s = Settings::default();
+        let input = vec![Frame::from_rgba(1, 1, &[20, 40, 60, 255], 100)];
+        let mut complete = Vec::new();
+        write_gif(&input, &mut complete, 80, &[], 0, &s, &|_, _| {}).unwrap();
+        assert_eq!(complete.last(), Some(&0x3b));
+        // 프레임은 모두 받고 마지막 종료 표시 한 바이트만 거절한다.
+        let mut writer = FailingWriter { limit: Some(complete.len() - 1), ..Default::default() };
+        let error = write_gif(&input, &mut writer, 80, &[], 0, &s, &|_, _| {}).unwrap_err();
+        assert_eq!(error.to_string(), "마지막 쓰기 실패");
+        assert_eq!(writer.bytes, complete[..complete.len() - 1]);
+        assert!(!writer.flushed);
+    }
+
+    #[test]
+    fn gif_returns_buffered_flush_error() {
+        let s = Settings::default();
+        let input = vec![Frame::from_rgba(1, 1, &[20, 40, 60, 255], 100)];
+        let mut writer = FailingWriter { fail_flush: true, ..Default::default() };
+        let error = write_gif(&input, BufWriter::new(&mut writer), 80, &[], 0, &s, &|_, _| {}).unwrap_err();
+        assert_eq!(error.to_string(), "마지막 비우기 실패");
+        assert!(writer.flushed);
+        assert_eq!(writer.bytes.last(), Some(&0x3b), "종료 표시까지 쓴 뒤 비우기에서 실패한다");
+    }
+
+    #[test]
+    fn png_sequence_returns_exactly_the_planned_and_created_files() {
+        let s = Settings::default();
+        let dir = std::env::temp_dir().join(format!("opencam_png_paths_{}", std::process::id()));
+        let mut limited = opts(Format::Png);
+        limited.limit_fps = Some(20);
+        limited.resize_percent = 200;
+        limited.embed_progress = true;
+        let mut similar = opts(Format::Png);
+        similar.skip_similar = Some(0);
+        for (case, input, opt, count) in [
+            ("single", frames(1, 100), opts(Format::Png), 1),
+            ("multiple", frames(3, 100), opts(Format::Png), 3),
+            ("limited", frames(6, 20), limited, 2),
+            ("similar", vec![Frame::from_rgba(1, 1, &[20, 40, 60, 255], 100); 3], similar, 1),
+        ] {
+            let folder = dir.join(case);
+            std::fs::create_dir_all(&folder).unwrap();
+            let path = folder.join("영상.part.png");
+            let expected: Vec<PathBuf> = (1..=count).map(|i| folder.join(format!("영상.part_{i:04}.png"))).collect();
+            assert_eq!(planned_paths(&input, &path, &opt, &s), expected, "{case}");
+            let actual = export(&input, &path, &opt, &s, &|_, _| {}).unwrap();
+            assert_eq!(actual, expected, "{case}");
+            let mut on_disk: Vec<PathBuf> = std::fs::read_dir(&folder).unwrap().map(|e| e.unwrap().path()).collect();
+            on_disk.sort();
+            assert_eq!(actual, on_disk, "{case}");
+            assert!(!path.exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -980,7 +1095,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for f in [Format::Gif, Format::Webp, Format::Apng] {
             let p = dir.join(format!("t.{}", f.ext()));
-            export(&frames(3, 100), &p, &opts(f), &s, &|_, _| {}).unwrap();
+            let paths = export(&frames(3, 100), &p, &opts(f), &s, &|_, _| {}).unwrap();
+            assert_eq!(paths, vec![p.clone()]);
             assert!(std::fs::metadata(&p).unwrap().len() > 0, "{f:?}");
         }
         let _ = std::fs::remove_dir_all(&dir);
