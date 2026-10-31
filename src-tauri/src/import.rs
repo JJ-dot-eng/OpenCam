@@ -256,6 +256,8 @@ fn ffmpeg_command() -> Result<Command> {
 }
 
 /// `ffmpeg -i`가 알려 주는 정보에서 크기·길이·FPS를 읽는다 (ffprobe 없이)
+// 지금은 테스트에서만 쓰므로 일반 빌드에서는 미사용 경고를 끈다.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_ffmpeg_info(text: &str) -> Option<VideoInfo> {
     parse_ffmpeg_info_inner(text).map(|(info, _)| info)
 }
