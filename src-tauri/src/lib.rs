@@ -25,6 +25,7 @@ use recorder::{RecStatus, RecordOptions, Recorder};
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -32,6 +33,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 struct AppState {
     settings: Mutex<Settings>,
     project: Mutex<Project>,
+    append_busy: AtomicBool,
     recorder: Mutex<Option<Recorder>>,
     /// 녹화 틀 창 안에서 뚫린 구멍의 위치 (물리 픽셀, 창 왼쪽 위 기준)
     hole: Mutex<Rect>,
@@ -49,6 +51,32 @@ struct AppState {
 }
 
 type CmdResult<T> = Result<T, String>;
+
+/// 오류·취소로 끝나도 붙이기 처리 중 표시를 푼다. 프로젝트 잠금은 기다리는 동안 잡지 않는다.
+struct AppendPermit<'a>(&'a AtomicBool);
+
+impl<'a> AppendPermit<'a> {
+    fn acquire(busy: &'a AtomicBool) -> CmdResult<Self> {
+        busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "파일을 붙이는 중입니다. 끝난 뒤 다시 해 주세요".to_string())?;
+        Ok(Self(busy))
+    }
+}
+
+impl Drop for AppendPermit<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+fn check_append_generation(started: u64, current: u64) -> CmdResult<()> {
+    if started == current {
+        Ok(())
+    } else {
+        Err("붙이는 동안 다른 작업으로 바뀌어 붙이지 않았습니다".into())
+    }
+}
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -1607,11 +1635,12 @@ fn load_for_append(
 /// 읽지 못한 파일은 건너뛰고 skipped로 알린다. 모두 못 읽었으면 아무것도 바꾸지 않는다.
 #[tauri::command]
 async fn append_files(app: AppHandle, paths: Vec<String>) -> CmdResult<AppendResult> {
-    let (size, used) = {
-        let state = app.state::<AppState>();
+    let state = app.state::<AppState>();
+    let _permit = AppendPermit::acquire(&state.append_busy)?;
+    let (size, used, generation) = {
         let p = state.project.lock();
         let f = p.frames.first().ok_or("편집 중인 프레임이 없습니다")?;
-        ((f.width, f.height), p.memory_bytes() as usize)
+        ((f.width, f.height), p.memory_bytes() as usize, p.generation)
     };
     let fps = app.state::<AppState>().settings.lock().fps as f32;
     // 편집 메모리 한도에서 이미 쓰는 만큼을 뺀 만큼만 더 불러온다 (대략)
@@ -1646,8 +1675,8 @@ async fn append_files(app: AppHandle, paths: Vec<String>) -> CmdResult<AppendRes
     })
     .await
     .map_err(err)?;
-    let state = app.state::<AppState>();
     let mut p = state.project.lock();
+    check_append_generation(generation, p.generation)?;
     let selection = if frames.is_empty() {
         None
     } else {
@@ -1774,6 +1803,7 @@ pub fn run() {
         )
         .manage(AppState {
             project: Mutex::new(project),
+            append_busy: AtomicBool::new(false),
             settings: Mutex::new(settings),
             recorder: Mutex::new(None),
             hole: Mutex::new(Rect { x: 0, y: 0, w: 0, h: 0 }),
@@ -1918,6 +1948,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_rejects_results_from_another_project() {
+        let mut p = Project::default();
+        p.load(vec![]);
+        let started = p.generation;
+        assert!(check_append_generation(started, p.generation).is_ok());
+        // 내용·크기가 같아도 새로 연 작업이면 지난 결과를 받지 않는다. 비우기도 같다.
+        p.load(vec![]);
+        assert!(check_append_generation(started, p.generation).is_err());
+        let next = p.generation;
+        p.load(vec![]);
+        assert!(check_append_generation(next, p.generation).is_err());
+    }
+
+    #[test]
+    fn append_rejects_overlapping_calls_and_releases_on_error() {
+        let busy = AtomicBool::new(false);
+        let permit = AppendPermit::acquire(&busy).unwrap();
+        assert!(AppendPermit::acquire(&busy).is_err());
+        drop(permit);
+        let fail = || -> CmdResult<()> {
+            let _permit = AppendPermit::acquire(&busy)?;
+            Err("파일을 읽지 못했습니다".into())
+        };
+        assert!(fail().is_err());
+        assert!(!busy.load(Ordering::SeqCst));
+        assert!(AppendPermit::acquire(&busy).is_ok());
+    }
 
     #[test]
     fn ctrl_prtsc_shortcut_parses_and_is_disabled_for_old_settings() {

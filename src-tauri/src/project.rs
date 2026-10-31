@@ -27,6 +27,8 @@ pub struct Project {
     pub dirty: bool,
     /// 프레임 목록이 바뀔 때마다 늘어나는 번호 (작업 자동 저장이 바뀐 것을 알아챈다)
     pub revision: u64,
+    /// 새로 열기·녹화·비우기로 작업 전체가 바뀔 때만 늘어나는 번호
+    pub generation: u64,
     /// 영상 요약용 "앞 프레임과 얼마나 다른가" 점수. 프레임 id 목록이 같을 때만 다시 쓴다.
     change_scores: Option<(Vec<u64>, Vec<f32>)>,
 }
@@ -72,6 +74,7 @@ pub enum Rotate {
 
 impl Project {
     pub fn load(&mut self, frames: Vec<Frame>) {
+        self.generation = self.generation.wrapping_add(1);
         self.initial = frames.clone();
         self.frames = frames;
         self.undo.clear();
