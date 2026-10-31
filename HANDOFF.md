@@ -1,17 +1,19 @@
 # 인계
 
-갱신: 2026-10-31, Claude (Opus 5.5)
+갱신: 2026-10-31, Claude Code 담당 (Claude Opus 5.5)
 
 이 파일은 끝낼 때마다 덮어쓴다. 자세한 기록은 [docs/TODO.md](docs/TODO.md).
 
 ## 끝난 일
-- v0.1.5 공개 릴리스(버그 14개 수정). 모든 커밋은 GitHub `main`에 있다.
-- 다 쓴 작업 브랜치·작업 폴더를 지웠다.
+- v0.1.5 공개 릴리스(버그 14개 수정). 릴리스까지의 커밋은 GitHub `main`에 있다.
 - 할 일 목록과 다음 기능 기획을 `docs/`로 옮겨 공개했고, AI 작업 안내 [AGENTS.md](AGENTS.md)와 이 인계 파일을 만들었다.
+- 깨진 동영상 불러오기 멈춤과 영상 저장 중 ffmpeg 출력 멈춤을 고쳤다 (ffmpeg 오류 출력을 따로 읽고 끝 8KB만 남김).
+  브랜치 `fix/video-import-stderr-deadlock`, PR #1 (https://github.com/JJ-dot-eng/OpenCam/pull/1). 아직 main에 합치지 않았다.
 
 ## 남은 일
-- 보류한 버그: 정전 시 복구 파일 동기화, 영상 저장 중 ffmpeg 출력 멈춤, 깨진 동영상 불러오기 멈춤,
-  녹화 틀 옮길 때 잠깐 끊김, 저장 결과에 단축키 오류.
+- Windows PC에서 `cd src-tauri && cargo test`로 빌드·테스트를 확인한 뒤 PR #1 합치기
+  (이 수정은 빌드가 안 되는 Linux 환경에서 만들어 컴파일·테스트를 못 했다).
+- 보류한 버그: 정전 시 복구 파일 동기화, 녹화 틀 옮길 때 잠깐 끊김, 저장 결과에 단축키 오류.
 - 실제 앱으로 확인 못 한 것: 세로(돌린) 모니터 녹화, 복구 카드에서 "복구"를 누른 뒤의 동작(자동 테스트로만 확인).
 - 새 기능 후보는 [docs/next-features.md](docs/next-features.md). 아직 고르지 않았다.
 

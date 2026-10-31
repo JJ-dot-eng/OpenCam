@@ -1,6 +1,6 @@
 //! 파일 열기: GIF·WebP·APNG(움직이는 그림), 일반 이미지 여러 장, 동영상(ffmpeg).
 
-use crate::export::{Progress, find_ffmpeg};
+use crate::export::{Progress, STDERR_TAIL, find_ffmpeg, spawn_stderr_tail};
 use crate::frame::Frame;
 use crate::project::resize_rgba;
 use anyhow::{Context, Result, anyhow, bail};
@@ -292,6 +292,15 @@ pub fn load_video(
         .stderr(Stdio::piped())
         .spawn()
         .context("ffmpeg 실행 실패")?;
+    // 여기부터는 어느 길로 나가든 ffmpeg를 기다리고 stderr 스레드를 join한다
+    let err_tail = match spawn_stderr_tail(child.stderr.take().unwrap(), STDERR_TAIL) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::Error::new(e).context("ffmpeg 실행 실패"));
+        }
+    };
     let mut out = child.stdout.take().unwrap();
     let expected = ((end_ms - start_ms) as f32 / 1000.0 * fps).ceil().max(1.0);
     let frame_len = (w * h * 4) as usize;
@@ -312,15 +321,18 @@ pub fn load_video(
             break;
         }
     }
-    let status = child.wait()?;
-    if c.frames.is_empty() {
-        let mut err = String::new();
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_string(&mut err);
-        }
-        if !status.success() {
-            bail!("ffmpeg 오류: {}", err.trim());
-        }
+    // 읽기가 오류로 끝났어도 ffmpeg가 stdout에 막혀 멈추지 않게 먼저 닫는다
+    drop(out);
+    let status = child.wait();
+    if status.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // ffmpeg가 끝나 stderr가 닫히면 스레드도 끝난다
+    let err = err_tail.join().unwrap_or_default();
+    let status = status?;
+    if c.frames.is_empty() && !status.success() {
+        bail!("ffmpeg 오류: {err}");
     }
     c.finish()
 }
@@ -460,5 +472,56 @@ mod tests {
         assert_eq!(loaded.frames.len(), 1);
         assert!(loaded.warning.is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_video_does_not_hang() {
+        // 깨진 동영상은 ffmpeg가 stderr에 64KB 넘게 쓴다. 예전에는 stderr를 안 읽어서 파이프가 차 서로 기다리며 멈췄다
+        if find_ffmpeg().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("opencam_vcorrupt_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("bad.mp4");
+        let made = ["libx264", "mpeg4"].into_iter().any(|codec| {
+            ffmpeg_command()
+                .unwrap()
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30", "-t", "20"])
+                .args(["-c:v", codec, "-pix_fmt", "yuv420p"])
+                .arg(&p)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        });
+        if !made {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // 가운데 절반을 쓰레기로 덮는다
+        let mut bytes = std::fs::read(&p).unwrap();
+        let n = bytes.len();
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        for b in &mut bytes[n / 4..n * 3 / 4] {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x as u8;
+        }
+        std::fs::write(&p, &bytes).unwrap();
+        let ps = p.to_string_lossy().into_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = load_video(&ps, 0, 20_000, 10.0, 160, 90, usize::MAX, &|_, _| {});
+            let _ = tx.send(r.map(|l| l.frames.len()).map_err(|e| e.to_string()));
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&dir);
+        // 일부만 불러오든 오류든 괜찮다. 멈추지만 않으면 된다
+        let r = r.expect("깨진 동영상을 불러오다 멈춤");
+        if let Err(e) = r {
+            assert!(e.len() < STDERR_TAIL + 100, "오류 메시지가 너무 김: {} 바이트", e.len());
+        }
     }
 }
