@@ -7,7 +7,7 @@ use crate::settings::Settings;
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 use serde::Deserialize;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -605,6 +605,51 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
     std::env::split_paths(&path).map(|p| p.join("ffmpeg.exe")).find(|p| p.exists())
 }
 
+/// ffmpeg 오류 메시지는 끝부분 이만큼만 남긴다
+pub(crate) const STDERR_TAIL: usize = 8 * 1024;
+
+/// stderr를 다른 스레드에서 끝까지 읽어 마지막 keep바이트만 남긴다.
+/// 읽어 주지 않으면 ffmpeg가 오류를 많이 쓸 때(깨진 동영상 등) 파이프가 가득 차 ffmpeg가 멈추고,
+/// stdin에 쓰거나 stdout을 기다리는 쪽도 같이 멈춘다.
+pub(crate) fn spawn_stderr_tail(
+    mut err: impl Read + Send + 'static,
+    keep: usize,
+) -> std::io::Result<std::thread::JoinHandle<String>> {
+    std::thread::Builder::new().name("ffmpeg-stderr".into()).spawn(move || {
+        let mut tail: Vec<u8> = Vec::new();
+        let mut cut = false;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match err.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    tail.extend_from_slice(&chunk[..n]);
+                    // 매번 앞을 지우면 느리므로 두 배가 넘으면 한 번에 자른다
+                    if tail.len() > keep * 2 {
+                        let extra = tail.len() - keep;
+                        tail.drain(..extra);
+                        cut = true;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        if tail.len() > keep {
+            let extra = tail.len() - keep;
+            tail.drain(..extra);
+            cut = true;
+        }
+        let text = String::from_utf8_lossy(&tail);
+        // 앞이 잘렸으면 첫 줄은 중간부터라 버린다
+        let text = match (cut, text.find('\n')) {
+            (true, Some(i)) => &text[i + 1..],
+            _ => &text[..],
+        };
+        text.trim().to_string()
+    })
+}
+
 fn video(frames: &[Frame], path: &Path, format: Format, quality: u8, s: &Settings, progress: Progress) -> Result<()> {
     let ffmpeg = find_ffmpeg()
         .ok_or_else(|| anyhow!("ffmpeg.exe를 찾을 수 없습니다. ffmpeg를 설치하거나 프로그램 폴더에 넣어 주세요."))?;
@@ -646,6 +691,16 @@ fn video(frames: &[Frame], path: &Path, format: Format, quality: u8, s: &Setting
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: 검은 콘솔 창을 띄우지 않는다
     }
     let mut child = cmd.spawn().context("ffmpeg 실행 실패")?;
+    // 여기부터는 어느 길로 나가든 ffmpeg를 기다리고 stderr 스레드를 join한다.
+    // stderr를 따로 읽지 않으면 ffmpeg가 오류를 많이 쓸 때 서로 기다리며 멈춘다
+    let err_tail = match spawn_stderr_tail(child.stderr.take().unwrap(), STDERR_TAIL) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::Error::new(e).context("ffmpeg 실행 실패"));
+        }
+    };
     // MP4는 투명을 못 쓴다: "다른 색으로 바꾸기"가 켜져 있으면 그 색, 아니면 검정 위에 합성
     let matte = matches!(format, Format::Mp4 | Format::Avif)
         .then(|| if s.mp4_replace_transparent { bgr(s.transparent_replace_color) } else { [0, 0, 0] });
@@ -669,10 +724,17 @@ fn video(frames: &[Frame], path: &Path, format: Format, quality: u8, s: &Setting
             progress((i + 1) as f32 / frames.len() as f32 * 0.95, "동영상 인코딩 중");
         }
         let _ = stdin.flush();
+        // 여기서 stdin이 닫혀야 ffmpeg가 끝난다
     }
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!("ffmpeg 오류: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let status = child.wait();
+    if status.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // ffmpeg가 끝나 stderr가 닫히면 스레드도 끝난다
+    let err = err_tail.join().unwrap_or_default();
+    if !status?.success() {
+        bail!("ffmpeg 오류: {err}");
     }
     Ok(())
 }
@@ -1100,6 +1162,19 @@ mod tests {
             assert!(std::fs::metadata(&p).unwrap().len() > 0, "{f:?}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stderr_tail_keeps_last_lines() {
+        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        let tail = spawn_stderr_tail(std::io::Cursor::new(text.into_bytes()), 100).unwrap().join().unwrap();
+        assert!(tail.len() <= 100, "{tail}");
+        assert!(tail.ends_with("line 999"), "{tail}");
+        // 잘린 첫 줄은 버린다
+        assert!(tail.starts_with("line "), "{tail}");
+        // 짧으면 그대로
+        let short = spawn_stderr_tail(std::io::Cursor::new(b" oops \n".to_vec()), 100).unwrap().join().unwrap();
+        assert_eq!(short, "oops");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! 파일 열기: GIF·WebP·APNG(움직이는 그림), 일반 이미지 여러 장, 동영상(ffmpeg).
 
-use crate::export::{Progress, find_ffmpeg};
+use crate::export::{Progress, STDERR_TAIL, find_ffmpeg, spawn_stderr_tail};
 use crate::frame::Frame;
 use crate::project::resize_rgba;
 use anyhow::{Context, Result, anyhow, bail};
@@ -266,50 +266,6 @@ pub fn video_frame_png(path: &str, at_ms: u64, max_w: u32) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// ffmpeg 오류 메시지는 끝부분 이만큼만 남긴다
-const STDERR_TAIL: usize = 8 * 1024;
-
-/// stderr를 다른 스레드에서 끝까지 읽어 마지막 keep바이트만 남긴다.
-/// 읽어 주지 않으면 깨진 동영상에서 파이프가 가득 차 ffmpeg가 멈추고, stdout을 기다리는 쪽도 같이 멈춘다.
-fn spawn_stderr_tail(
-    mut err: impl Read + Send + 'static,
-    keep: usize,
-) -> std::io::Result<std::thread::JoinHandle<String>> {
-    std::thread::Builder::new().name("ffmpeg-stderr".into()).spawn(move || {
-        let mut tail: Vec<u8> = Vec::new();
-        let mut cut = false;
-        let mut chunk = [0u8; 4096];
-        loop {
-            match err.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    tail.extend_from_slice(&chunk[..n]);
-                    // 매번 앞을 지우면 느리므로 두 배가 넘으면 한 번에 자른다
-                    if tail.len() > keep * 2 {
-                        let extra = tail.len() - keep;
-                        tail.drain(..extra);
-                        cut = true;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
-        if tail.len() > keep {
-            let extra = tail.len() - keep;
-            tail.drain(..extra);
-            cut = true;
-        }
-        let text = String::from_utf8_lossy(&tail);
-        // 앞이 잘렸으면 첫 줄은 중간부터라 버린다
-        let text = match (cut, text.find('\n')) {
-            (true, Some(i)) => &text[i + 1..],
-            _ => &text[..],
-        };
-        text.trim().to_string()
-    })
-}
-
 /// 동영상의 [start, end) 구간을 fps로 뽑아 w×h 프레임으로 불러온다
 pub fn load_video(
     path: &str,
@@ -516,19 +472,6 @@ mod tests {
         assert_eq!(loaded.frames.len(), 1);
         assert!(loaded.warning.is_some());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn stderr_tail_keeps_last_lines() {
-        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
-        let tail = spawn_stderr_tail(std::io::Cursor::new(text.into_bytes()), 100).unwrap().join().unwrap();
-        assert!(tail.len() <= 100, "{tail}");
-        assert!(tail.ends_with("line 999"), "{tail}");
-        // 잘린 첫 줄은 버린다
-        assert!(tail.starts_with("line "), "{tail}");
-        // 짧으면 그대로
-        let short = spawn_stderr_tail(std::io::Cursor::new(b" oops \n".to_vec()), 100).unwrap().join().unwrap();
-        assert_eq!(short, "oops");
     }
 
     #[test]
