@@ -159,6 +159,11 @@ export const FORMAT_EXT: Record<Format, string> = {
   avif: "avif",
 };
 
+export interface ExportResult {
+  paths: string[];
+  size: number;
+}
+
 export interface ExportOptions {
   format: Format;
   quality: number;
@@ -376,7 +381,8 @@ export const api = {
   defaultSavePath: (ext: string) => invoke<string>("default_save_path", { ext }),
   pickSavePath: (current: string, ext: string) => invoke<string | null>("pick_save_path", { current, ext }),
   pickFolder: (current: string) => invoke<string | null>("pick_folder", { current }),
-  exportProject: (opts: ExportOptions, path: string) => invoke<number>("export_project", { opts, path }),
+  exportConflicts: (opts: ExportOptions, path: string) => invoke<string[]>("export_conflicts", { opts, path }),
+  exportProject: (opts: ExportOptions, path: string) => invoke<ExportResult>("export_project", { opts, path }),
   estimateSize: (opts: ExportOptions) => invoke<number>("estimate_size", { opts }),
   hasFfmpeg: () => invoke<boolean>("has_ffmpeg"),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, errText, ExportOptions, extOf, Format, FORMAT_EXT, formatBytes, FrameInfo, hexToRgb, Settings } from "./api";
+import { api, errText, ExportOptions, ExportResult, extOf, Format, FORMAT_EXT, formatBytes, FrameInfo, hexToRgb, Settings } from "./api";
 import { Check, Modal, NumField } from "./dialogs";
 import { chooseAsk, confirmAsk } from "./ask";
 
@@ -53,7 +53,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
   const [estimate, setEstimate] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ p: number; msg: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<{ path: string; size: number } | null>(null);
+  const [done, setDone] = useState<ExportResult | null>(null);
   const [ffmpeg, setFfmpeg] = useState(true);
   // 특정 색 보호 (GIF): 이 색들은 팔레트에 그대로 남긴다
   const [protect, setProtect] = useState<string[]>([]);
@@ -132,8 +132,15 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
     );
     try {
       const o = { ...opts(), gifFit50fps: fit50 };
-      const size = await api.exportProject(o, target);
-      setDone({ path: target, size });
+      if (format === "png") {
+        const conflicts = await api.exportConflicts(o, target);
+        if (conflicts.length && !(await confirmAsk("같은 이름의 파일이 있습니다. 덮어쓸까요?", "덮어쓰기"))) {
+          setProgress(null);
+          return;
+        }
+      }
+      const result = await api.exportProject(o, target);
+      setDone(result);
       onSaved();
       // 이번에 고른 옵션을 다음 저장의 기본값으로
       const q: Partial<Settings> =
@@ -171,21 +178,30 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
   if (done) {
     return (
       <Modal title="저장했습니다" onClose={onClose}>
-        <p className="saved-path">{done.path}</p>
+        <p className="saved-path">{done.paths[0]}</p>
+        {done.paths.length > 1 && <p className="hint">PNG {done.paths.length}장을 저장했습니다</p>}
         {done.size > 0 && <p className="hint">파일 크기 {formatBytes(done.size)}</p>}
         <div className="col">
-          <button className="primary" onClick={() => api.revealFile(done.path).catch((e) => setError(errText(e)))}>
+          <button className="primary" onClick={() => api.revealFile(done.paths[0]).catch((e) => setError(errText(e)))}>
             📂 폴더 열기
           </button>
           <button onClick={onClose}>편집으로 돌아가기</button>
           <button
             onClick={async () => {
               if (!(await confirmAsk("방금 저장한 파일을 지울까요?", "지우기"))) return;
+              let deleted = 0;
               try {
-                await api.deleteFile(done.path);
+                for (const path of done.paths) {
+                  await api.deleteFile(path);
+                  deleted++;
+                }
                 onDeleted();
                 onClose();
               } catch (e) {
+                if (deleted) {
+                  setDone({ ...done, paths: done.paths.slice(deleted) });
+                  onDeleted();
+                }
                 setError(errText(e));
               }
             }}

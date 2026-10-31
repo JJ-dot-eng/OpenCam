@@ -855,9 +855,31 @@ struct ExportProgress {
     message: String,
 }
 
-/// 저장하고 파일 크기를 돌려준다 (PNG 연속 이미지는 0)
+#[derive(Serialize)]
+struct ExportResult {
+    paths: Vec<PathBuf>,
+    size: u64,
+}
+
+/// 이번 저장으로 덮어쓰게 될 파일을 찾는다.
 #[tauri::command]
-async fn export_project(app: AppHandle, opts: ExportOptions, path: String) -> CmdResult<u64> {
+async fn export_conflicts(app: AppHandle, opts: ExportOptions, path: String) -> CmdResult<Vec<PathBuf>> {
+    let (frames, s) = {
+        let state = app.state::<AppState>();
+        let frames = state.project.lock().frames.clone();
+        let s = state.settings.lock().clone();
+        (frames, s)
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        export::planned_paths(&frames, Path::new(&path), &opts, &s).into_iter().filter(|p| p.exists()).collect()
+    })
+    .await
+    .map_err(err)
+}
+
+/// 저장한 파일 목록과 전체 크기를 돌려준다.
+#[tauri::command]
+async fn export_project(app: AppHandle, opts: ExportOptions, path: String) -> CmdResult<ExportResult> {
     let (frames, s) = {
         let state = app.state::<AppState>();
         let frames = state.project.lock().frames.clone();
@@ -865,17 +887,17 @@ async fn export_project(app: AppHandle, opts: ExportOptions, path: String) -> Cm
         (frames, s)
     };
     let h = app.clone();
-    let p = path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        export::export(&frames, Path::new(&p), &opts, &s, &|progress, msg| {
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        export::export(&frames, Path::new(&path), &opts, &s, &|progress, msg| {
             let _ = h.emit("export-progress", ExportProgress { progress, message: msg.into() });
         })
     })
     .await
     .map_err(err)?
     .map_err(|e| format!("{e:#}"))?;
+    let size = paths.iter().map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum();
     app.state::<AppState>().project.lock().dirty = false;
-    Ok(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0))
+    Ok(ExportResult { paths, size })
 }
 
 #[tauri::command]
@@ -1858,6 +1880,7 @@ pub fn run() {
             default_save_path,
             pick_save_path,
             pick_folder,
+            export_conflicts,
             export_project,
             estimate_size,
             has_ffmpeg,
