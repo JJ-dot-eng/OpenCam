@@ -251,12 +251,7 @@ export interface VideoInfo {
 /** 여러 장을 한 크기로 맞추는 방법: 비율 유지(남는 곳 투명) / 꽉 채우기 */
 export type Fit = "contain" | "stretch";
 
-export const VIDEO_EXTS = ["mp4", "webm", "mkv", "mov", "avi", "wmv", "m4v", "flv", "mpg", "mpeg", "ts"];
-
-export function extOf(path: string): string {
-  const m = /\.([^.\\/]+)$/.exec(path);
-  return m ? m[1].toLowerCase() : "";
-}
+export { VIDEO_EXTS, extOf } from "./dropHandling";
 
 export type PlayMode = "hold" | "repeat" | "sync" | "sequence";
 
