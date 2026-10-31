@@ -3,8 +3,10 @@
 import { ComponentType, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { api, EditOp, errText, extOf, formatBytes, formatMs, frameUrl, hexToRgb, ProjectView, Settings, VIDEO_EXTS, VideoInfo } from "./api";
-import { beginAppend, blocksProjectChange, createAppendGuard, finishAppend, invalidateAppend, isCurrentAppend } from "./appendGuard";
+import { api, EditOp, errText, formatBytes, formatMs, frameUrl, hexToRgb, ProjectView, Settings, VideoInfo } from "./api";
+import { blocksProjectChange, createAppendGuard, invalidateAppend } from "./appendGuard";
+import { appendBlockMessage, appendShortcutAction, isProjectDialog, runAppend } from "./appendLock";
+import { classifyOpenPaths, DropKind, getDropKind, handleFileDrop } from "./dropHandling";
 import {
   IconAdjustmentsHorizontal,
   IconArrowBackUp,
@@ -66,7 +68,6 @@ import { CollageDialog, ExportFramesDialog, ManageDialog, NewBlankDialog } from 
 import FrameStrip from "./FrameStrip";
 import "./editor.css";
 import { alertAsk, AskHost, confirmAsk } from "./ask";
-import { sortByFileName } from "./fileOrder";
 import { SidePanelTarget } from "./SidePanel";
 import { ModalInPanel } from "./dialogs";
 import { DirtyReport, FrameContext } from "./Panel";
@@ -95,12 +96,6 @@ const MODES: string[] = ["crop", "filter", "draw", "insert", "zoom"];
 const PANEL_DIALOGS: string[] = ["reduce", "resize", "transition", "summary", "upscale"];
 /** 열기에서 옵션을 물어봐야 하는 경우 */
 type ImportRequest = null | { kind: "video"; path: string; info: VideoInfo } | { kind: "images"; paths: string[] };
-
-/** 파일을 끌어 오는 동안: 놓으면 맨 뒤에 붙는지, 새로 여는지, 받지 않는지(null) */
-type DropKind = null | "append" | "open";
-
-/** 움직이는 그림일 수 있는 확장자 (하나만 열면 옵션 없이 바로 불러온다) */
-const ANIMATED_EXTS = ["gif", "webp", "png", "apng"];
 
 /** 프레임 작업 (오른쪽 패널 버튼과 썸네일 오른쪽 클릭 메뉴): [값, 이름, 아이콘, 단축키] */
 const FRAME_ACTIONS: [string, string, Icon, string][] = [
@@ -161,13 +156,14 @@ export default function Editor() {
   }, []);
 
   const blockWhileAppending = useCallback(() => {
-    if (!blocksProjectChange(appendGuard.current)) return false;
-    showToast("파일을 붙이는 중입니다. 끝난 뒤 다시 해 주세요");
+    const message = appendBlockMessage(appendGuard.current);
+    if (!message) return false;
+    showToast(message);
     return true;
   }, [showToast]);
 
   const openNewDialog = useCallback((d: Dialog) => {
-    if ((d === "newBlank" || d === "collage") && blockWhileAppending()) return;
+    if (isProjectDialog(d) && blockWhileAppending()) return;
     setDialog(d);
   }, [blockWhileAppending]);
 
@@ -348,22 +344,21 @@ export default function Editor() {
       )
         return;
       if (blockWhileAppending()) return;
-      const sorted = sortByFileName(paths);
-      const videos = sorted.filter((p) => VIDEO_EXTS.includes(extOf(p)));
-      if (videos.length > 0) {
-        if (sorted.length > 1) return showToast("동영상은 하나씩 따로 열어 주세요");
+      const decision = classifyOpenPaths(paths);
+      if (decision.kind === "reject") return showToast(decision.message);
+      if (decision.kind === "video") {
         setBusy(true);
         try {
-          setImportReq({ kind: "video", path: videos[0], info: await api.probeVideo(videos[0]) });
+          setImportReq({ kind: "video", path: decision.path, info: await api.probeVideo(decision.path) });
         } catch (e) {
           showToast(errText(e));
         } finally {
           setBusy(false);
         }
-      } else if (sorted.length === 1 && ANIMATED_EXTS.includes(extOf(sorted[0]))) {
-        await exec(() => api.importFiles(sorted, 100, "contain"));
+      } else if (decision.kind === "import") {
+        await exec(() => api.importFiles(decision.paths, 100, "contain"));
       } else {
-        setImportReq({ kind: "images", paths: sorted });
+        setImportReq({ kind: "images", paths: decision.paths });
       }
     },
     [view, askDiscard, exec, showToast, blockWhileAppending],
@@ -371,49 +366,24 @@ export default function Editor() {
 
   /** 끌어 놓은 파일을 편집 중인 프레임 맨 뒤에 붙인다 (파일 이름 순서, 되돌리기 한 번). 못 읽은 파일은 끝나고 한 번에 알린다. */
   const appendPaths = useCallback(
-    async (paths: string[]) => {
-      const started = beginAppend(appendGuard.current);
-      if (!started) {
-        blockWhileAppending();
-        return;
-      }
-      // 첫 await 전에 잠가서 같은 순간에 들어오는 두 번째 drop도 막는다.
-      appendGuard.current = started.guard;
-      const job = started.job;
-      setBusy(true);
-      setPlaying(false);
-      try {
-        const sorted = sortByFileName(paths);
-        const r = await api.appendFiles(sorted);
-        if (!isCurrentAppend(appendGuard.current, job)) {
-          // 화면 작업 번호가 낡아도 Rust는 붙였을 수 있으므로 지금 내용을 다시 읽는다.
-          const v = await api.projectView();
-          setView(v);
-          const n = v.frames.length;
-          setSel((s) => s.filter((i) => i >= 0 && i < n));
-          setCurrent((c) => Math.max(0, Math.min(c, n - 1)));
-          return;
-        }
-        applyView(r.view);
-        const skipped = r.skipped;
-        if (skipped.length === 0) return;
-        const shown = skipped.slice(0, 15).map((s) => `· ${s.name}: ${s.reason}`);
-        if (skipped.length > shown.length) shown.push(`… 그 밖에 ${skipped.length - shown.length}개`);
-        const head =
-          skipped.length === sorted.length
-            ? "파일을 붙이지 못했습니다. 편집 중인 프레임은 그대로입니다."
-            : `${skipped.length}개 파일은 붙이지 못하고 건너뛰었습니다.`;
-        await alertAsk(`${head}\n\n${shown.join("\n")}`);
-      } catch (e) {
-        if (isCurrentAppend(appendGuard.current, job)) showToast(errText(e));
-      } finally {
-        if (appendGuard.current.activeId === job.id) {
-          appendGuard.current = finishAppend(appendGuard.current, job);
-          setBusy(false);
-          setBusyText("처리 중…");
-        }
-      }
-    },
+    (paths: string[]) => runAppend(paths, {
+      guard: appendGuard,
+      blockWhileAppending,
+      setBusy,
+      setPlaying,
+      setBusyText,
+      appendFiles: (sorted) => api.appendFiles(sorted),
+      projectView: () => api.projectView(),
+      applyStaleView: (v) => {
+        setView(v);
+        const n = v.frames.length;
+        setSel((s) => s.filter((i) => i >= 0 && i < n));
+        setCurrent((c) => Math.max(0, Math.min(c, n - 1)));
+      },
+      applyView,
+      alert: alertAsk,
+      showError: (e) => showToast(errText(e)),
+    }),
     [applyView, showToast, blockWhileAppending],
   );
 
@@ -434,17 +404,17 @@ export default function Editor() {
   const [dropHint, setDropHint] = useState<DropKind>(null);
   const drop = useRef<{ kind: () => DropKind; run: (paths: string[]) => void }>({ kind: () => null, run: () => {} });
   drop.current = {
-    kind: () => (blocksProjectChange(appendGuard.current) || busy || dialog || importReq || menu || mode || isModalOpen() ? null : frames.length > 0 ? "append" : "open"),
+    kind: () => getDropKind({ appending: blocksProjectChange(appendGuard.current), busy, dialog, importReq, menu, mode, isModalOpen, frameCount: frames.length }),
     run: (paths) => (frames.length > 0 ? appendPaths(paths) : openPaths(paths)),
   };
   useEffect(() => {
     const un = getCurrentWebview().onDragDropEvent((e) => {
-      const p = e.payload;
-      if (p.type === "enter" || p.type === "over") return setDropHint(drop.current.kind());
-      setDropHint(null);
-      if (p.type !== "drop" || p.paths.length === 0) return;
-      if (drop.current.kind()) drop.current.run(p.paths);
-      else showToast("처리 중이거나 창·도구가 열려 있어 파일을 받지 않았습니다");
+      handleFileDrop(e.payload, {
+        kind: () => drop.current.kind(),
+        setHint: setDropHint,
+        run: (paths) => drop.current.run(paths),
+        showToast,
+      });
     });
     return () => {
       un.then((f) => f());
@@ -524,10 +494,9 @@ export default function Editor() {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       // 처리 중에는 버튼처럼 단축키도 막는다 (편집이 겹치지 않게)
-      if (blocksProjectChange(appendGuard.current)) {
-        const ctrl = e.ctrlKey || e.metaKey;
-        const k = e.key.toLowerCase();
-        if ((ctrl && k === "o") || (!ctrl && k === "g")) {
+      const appendAction = appendShortcutAction(appendGuard.current, e);
+      if (appendAction !== "allow") {
+        if (appendAction === "notify") {
           e.preventDefault();
           blockWhileAppending();
         }
