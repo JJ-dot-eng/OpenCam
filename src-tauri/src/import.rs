@@ -1,10 +1,10 @@
 //! 파일 열기: GIF·WebP·APNG(움직이는 그림), 일반 이미지 여러 장, 동영상(ffmpeg).
 
 use crate::export::{Progress, STDERR_TAIL, find_ffmpeg, spawn_stderr_tail};
-use crate::frame::Frame;
+use crate::frame::{Frame, MAX_FRAME_BYTES, import_rgba_len};
 use crate::project::resize_rgba;
 use anyhow::{Context, Result, anyhow, bail};
-use image::{AnimationDecoder, RgbaImage};
+use image::{AnimationDecoder, ImageDecoder, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -79,6 +79,23 @@ fn gif_delay(ms: u32) -> u32 {
     if ms <= 10 { 100 } else { ms }
 }
 
+fn image_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_FRAME_BYTES as u64);
+    limits
+}
+
+fn image_rgba_len(w: u32, h: u32, path: &Path) -> Result<usize> {
+    import_rgba_len(w, h).ok_or_else(|| anyhow!("그림이 너무 커서 불러올 수 없습니다 ({w}×{h}): {}", path.display()))
+}
+
+fn limit_decoder(d: &mut impl ImageDecoder, path: &Path) -> Result<()> {
+    let (w, h) = d.dimensions();
+    image_rgba_len(w, h, path)?;
+    d.set_limits(image_limits())?;
+    Ok(())
+}
+
 /// 파일 하나의 프레임을 (가로, 세로, RGBA, 시간)으로 하나씩 on_frame에 넘긴다. 움직이지 않는 그림이면 한 장에 still_ms.
 /// on_frame이 false를 돌려주면 (메모리 한도) 나머지 프레임은 풀지 않고 멈춘다.
 fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Vec<u8>, u32) -> bool) -> Result<()> {
@@ -105,11 +122,14 @@ fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Ve
     let ext = ext_of(path);
     let single = match ext.as_str() {
         "gif" => {
-            frames_of(image::codecs::gif::GifDecoder::new(open()?)?.into_frames())?;
+            let mut d = image::codecs::gif::GifDecoder::new(open()?)?;
+            limit_decoder(&mut d, path)?;
+            frames_of(d.into_frames())?;
             None
         }
         "webp" => {
-            let d = image::codecs::webp::WebPDecoder::new(open()?)?;
+            let mut d = image::codecs::webp::WebPDecoder::new(open()?)?;
+            limit_decoder(&mut d, path)?;
             if d.has_animation() {
                 frames_of(d.into_frames())?;
                 None
@@ -118,7 +138,12 @@ fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Ve
             }
         }
         "png" | "apng" => {
-            let d = image::codecs::png::PngDecoder::new(open()?)?;
+            // PNG는 디코더를 만들 때도 버퍼를 준비하므로, IHDR만 먼저 읽어 크기를 검사한다.
+            let mut header = png::Decoder::new_with_limits(open()?, png::Limits { bytes: MAX_FRAME_BYTES });
+            let info = header.read_header_info()?;
+            image_rgba_len(info.width, info.height, path)?;
+            let mut d = image::codecs::png::PngDecoder::with_limits(open()?, image_limits())?;
+            limit_decoder(&mut d, path)?;
             if d.is_apng()? {
                 frames_of(d.apng()?.into_frames())?;
                 None
@@ -126,9 +151,18 @@ fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Ve
                 Some(still(image::DynamicImage::from_decoder(d)?.to_rgba8()))
             }
         }
-        _ => Some(still(
-            image::open(path).with_context(|| format!("이미지를 읽을 수 없습니다: {}", path.display()))?.to_rgba8(),
-        )),
+        _ => {
+            let mut d = image::ImageReader::open(path)
+                .with_context(|| format!("이미지를 읽을 수 없습니다: {}", path.display()))?
+                .into_decoder()
+                .with_context(|| format!("이미지를 읽을 수 없습니다: {}", path.display()))?;
+            limit_decoder(&mut d, path)?;
+            Some(still(
+                image::DynamicImage::from_decoder(d)
+                    .with_context(|| format!("이미지를 읽을 수 없습니다: {}", path.display()))?
+                    .to_rgba8(),
+            ))
+        }
     };
     if let Some((w, h, px)) = single {
         any = true;
@@ -151,12 +185,13 @@ pub fn fit_rgba(w: u32, h: u32, px: &[u8], tw: u32, th: u32, fit: Fit) -> Vec<u8
             let s = (tw as f32 / w as f32).min(th as f32 / h as f32);
             let (nw, nh) = (((w as f32 * s).round() as u32).clamp(1, tw), ((h as f32 * s).round() as u32).clamp(1, th));
             let small = resize_rgba(w, h, px, nw, nh, true);
-            let mut out = vec![0u8; (tw * th * 4) as usize];
+            let mut out = vec![0u8; tw as usize * th as usize * 4];
             let (ox, oy) = ((tw - nw) / 2, (th - nh) / 2);
+            let row_len = nw as usize * 4;
             for y in 0..nh {
-                let d = (((oy + y) * tw + ox) * 4) as usize;
-                let s = (y * nw * 4) as usize;
-                out[d..d + (nw * 4) as usize].copy_from_slice(&small[s..s + (nw * 4) as usize]);
+                let d = ((oy as usize + y as usize) * tw as usize + ox as usize) * 4;
+                let s = y as usize * row_len;
+                out[d..d + row_len].copy_from_slice(&small[s..s + row_len]);
             }
             out
         }
@@ -177,6 +212,9 @@ pub fn load_files_sized(
     max_bytes: usize,
     progress: Progress,
 ) -> Result<Loaded> {
+    if let Some((w, h)) = size {
+        import_rgba_len(w, h).ok_or_else(|| anyhow!("그림 크기가 너무 크거나 비었습니다 ({w}×{h})"))?;
+    }
     let mut c = Collector::new(max_bytes);
     for (k, p) in paths.iter().enumerate() {
         let path = Path::new(p);
@@ -293,6 +331,7 @@ pub fn load_video(
     }
     let fps = fps.clamp(1.0, 60.0);
     let (w, h) = (w.max(1), h.max(1));
+    let frame_len = import_rgba_len(w, h).ok_or_else(|| anyhow!("동영상 크기가 너무 커서 불러올 수 없습니다 ({w}×{h})"))?;
     let mut child = ffmpeg_command()?
         .args(["-v", "error", "-ss", &format!("{:.3}", start_ms as f64 / 1000.0)])
         .args(["-t", &format!("{:.3}", (end_ms - start_ms) as f64 / 1000.0), "-i", path])
@@ -314,7 +353,6 @@ pub fn load_video(
     };
     let mut out = child.stdout.take().unwrap();
     let expected = ((end_ms - start_ms) as f32 / 1000.0 * fps).ceil().max(1.0);
-    let frame_len = (w * h * 4) as usize;
     let mut buf = vec![0u8; frame_len];
     let mut c = Collector::new(max_bytes);
     let mut k = 0u64;
@@ -358,6 +396,7 @@ pub fn load_video_contain(
     max_bytes: usize,
     progress: Progress,
 ) -> Result<Loaded> {
+    import_rgba_len(tw, th).ok_or_else(|| anyhow!("그림 크기가 너무 크거나 비었습니다 ({tw}×{th})"))?;
     let info = probe_video(path)?;
     let fps = fps.min(info.fps.round()).max(1.0);
     let s = (tw as f32 / info.width as f32).min(th as f32 / info.height as f32);
@@ -376,6 +415,105 @@ pub fn load_video_contain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut crc = !0u32;
+        for &byte in kind.iter().chain(data) {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ if crc & 1 == 0 { 0 } else { 0xedb8_8320 };
+            }
+        }
+        out.extend_from_slice(&(!crc).to_be_bytes());
+    }
+
+    #[test]
+    fn huge_png_is_rejected_before_pixels() {
+        let dir = std::env::temp_dir().join(format!("opencam_import_huge_png_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for side in [65535u32, 30000] {
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            let mut ihdr = side.to_be_bytes().to_vec();
+            ihdr.extend_from_slice(&side.to_be_bytes());
+            ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+            png_chunk(&mut bytes, b"IHDR", &ihdr);
+            png_chunk(&mut bytes, b"IDAT", &[]);
+            png_chunk(&mut bytes, b"IEND", &[]);
+            for ext in ["png", "apng"] {
+                let path = dir.join(format!("huge_{side}.{ext}"));
+                std::fs::write(&path, &bytes).unwrap();
+                let err = decode_file(&path, 100, &mut |_, _, _, _| panic!("픽셀을 읽으면 안 됩니다")).unwrap_err();
+                let msg = err.to_string();
+                assert!(msg.contains("그림이 너무 커서 불러올 수 없습니다"), "{msg}");
+                assert!(msg.contains(&format!("{side}×{side}")), "{msg}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn huge_gif_is_rejected_before_pixels() {
+        let dir = std::env::temp_dir().join(format!("opencam_import_huge_gif_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge.gif");
+        let mut bytes = b"GIF89a".to_vec();
+        // 논리 화면과 첫 프레임은 65535×65535지만 픽셀 데이터는 한 칸짜리다.
+        bytes.extend_from_slice(&[255, 255, 255, 255, 0x80, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 255, 255, 255]);
+        bytes.extend_from_slice(&[0x2c, 0, 0, 0, 0, 255, 255, 255, 255, 0, 2, 2, 0x44, 0x01, 0, 0x3b]);
+        std::fs::write(&path, bytes).unwrap();
+        let err = decode_file(&path, 100, &mut |_, _, _, _| panic!("픽셀을 읽으면 안 됩니다")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("그림이 너무 커서 불러올 수 없습니다 (65535×65535)"), "{msg}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn huge_video_is_rejected_without_ffmpeg() {
+        for (w, h) in [(32768, 32768), (65535, 65535), (u32::MAX, u32::MAX)] {
+            let err = load_video("없는_파일.mp4", 0, 1000, 30.0, w, h, usize::MAX, &|_, _| {})
+                .err()
+                .expect("너무 큰 동영상은 거부해야 합니다");
+            assert!(err.to_string().contains("동영상 크기가 너무 커서 불러올 수 없습니다"), "{err}");
+        }
+    }
+
+    #[test]
+    fn invalid_target_is_rejected_before_reading_files() {
+        for size in [(65535, 65535), (u32::MAX, u32::MAX), (0, 1), (1, 0)] {
+            let err = load_files_sized(&[], 100, Fit::Contain, Some(size), usize::MAX, &|_, _| {})
+                .err()
+                .expect("잘못된 그림 크기는 거부해야 합니다");
+            assert!(err.to_string().contains("그림 크기가 너무 크거나 비었습니다"), "{err}");
+            let err = load_video_contain("없는_파일.mp4", 30.0, size.0, size.1, usize::MAX, &|_, _| {})
+                .err()
+                .expect("잘못된 그림 크기는 거부해야 합니다");
+            assert!(err.to_string().contains("그림 크기가 너무 크거나 비었습니다"), "{err}");
+        }
+    }
+
+    #[test]
+    fn still_images_and_open_errors() {
+        let dir = std::env::temp_dir().join(format!("opencam_import_still_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::ImageBuffer::from_pixel(3, 2, image::Rgb([11u8, 22, 33]));
+        for ext in ["jpg", "bmp"] {
+            let path = dir.join(format!("still.{ext}"));
+            img.save(&path).unwrap();
+            let loaded = load_files(&[path.to_string_lossy().into_owned()], 100, Fit::Contain, usize::MAX, &|_, _| {})
+                .unwrap();
+            assert_eq!(loaded.frames.len(), 1);
+            assert_eq!((loaded.frames[0].width, loaded.frames[0].height), (3, 2));
+            assert_eq!(loaded.frames[0].rgba().len(), 24);
+        }
+        let path = dir.join("없는_그림.jpg");
+        let err = decode_file(&path, 100, &mut |_, _, _, _| panic!("픽셀을 읽으면 안 됩니다")).unwrap_err();
+        assert_eq!(err.to_string(), format!("이미지를 읽을 수 없습니다: {}", path.display()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn parse_ffmpeg_output() {
