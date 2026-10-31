@@ -3,7 +3,8 @@
 import { ComponentType, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { api, AppendResult, EditOp, errText, extOf, formatBytes, formatMs, frameUrl, hexToRgb, ProjectView, Settings, VIDEO_EXTS, VideoInfo } from "./api";
+import { api, EditOp, errText, extOf, formatBytes, formatMs, frameUrl, hexToRgb, ProjectView, Settings, VIDEO_EXTS, VideoInfo } from "./api";
+import { beginAppend, blocksProjectChange, createAppendGuard, finishAppend, invalidateAppend, isCurrentAppend } from "./appendGuard";
 import {
   IconAdjustmentsHorizontal,
   IconArrowBackUp,
@@ -126,6 +127,7 @@ export default function Editor() {
   const [dialog, setDialog] = useState<Dialog>(null);
   const [mode, setModeRaw] = useState<Mode>(null);
   const [busy, setBusy] = useState(false);
+  const appendGuard = useRef(createAppendGuard());
   const [busyText, setBusyText] = useState("처리 중…");
   const [importReq, setImportReq] = useState<ImportRequest>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -158,7 +160,19 @@ export default function Editor() {
     window.setTimeout(() => setToast((c) => (c === m ? null : c)), 4000);
   }, []);
 
+  const blockWhileAppending = useCallback(() => {
+    if (!blocksProjectChange(appendGuard.current)) return false;
+    showToast("파일을 붙이는 중입니다. 끝난 뒤 다시 해 주세요");
+    return true;
+  }, [showToast]);
+
+  const openNewDialog = useCallback((d: Dialog) => {
+    if ((d === "newBlank" || d === "collage") && blockWhileAppending()) return;
+    setDialog(d);
+  }, [blockWhileAppending]);
+
   const load = useCallback(async () => {
+    appendGuard.current = invalidateAppend(appendGuard.current);
     fromRecorder.current = false;
     const v = await api.projectView();
     setView(v);
@@ -186,8 +200,9 @@ export default function Editor() {
         setDialog("settings");
       }),
       listen<Dialog>("open-dialog", (e) => {
+        if (blockWhileAppending()) return;
         fromRecorder.current = true;
-        setDialog(e.payload);
+        openNewDialog(e.payload);
       }),
       // 녹화가 끝나면 바로 저장 창 (설정에서 "바로 편집"을 켜면 편집만)
       listen("recorded", async () => {
@@ -199,7 +214,7 @@ export default function Editor() {
       ),
     ];
     return () => un.forEach((p) => p.then((f) => f()));
-  }, [load, showToast]);
+  }, [load, showToast, blockWhileAppending, openNewDialog]);
 
   // 미리보기 자리의 크기를 잰다 ("맞춤" 배율의 기준). 자리가 새로 그려져도 다시 붙고,
   // 창이 숨겨지거나 최소화되어 0이 될 때는 무시한다 (그 값이 남으면 맞춤이 5%가 됐다).
@@ -242,6 +257,7 @@ export default function Editor() {
 
   /** 녹화 틀에서 넘어왔다가 아무것도 불러오지 않고 끝냈으면 녹화 틀로 돌아간다 */
   const returnToRecorderIfCancelled = () => {
+    if (blockWhileAppending()) return;
     if (!fromRecorder.current) return;
     fromRecorder.current = false;
     if (view.frames.length === 0) api.showRecorder();
@@ -255,15 +271,17 @@ export default function Editor() {
 
   /** 편집 창을 닫고 녹화 틀로 (저장 안 한 내용이 있으면 묻는다) */
   const backToRecorder = useCallback(async () => {
+    if (blockWhileAppending()) return;
     if (
       askDiscard &&
       !(await confirmAsk("저장하지 않은 내용이 있습니다. 버리고 녹화 화면으로 돌아갈까요?", "버리고 돌아가기"))
     )
       return;
+    if (blockWhileAppending()) return;
     setView(EMPTY);
     setDialog(null);
     await api.showRecorder();
-  }, [view, askDiscard]);
+  }, [view, askDiscard, blockWhileAppending]);
 
   useEffect(() => {
     const un = listen("close-requested", async () => {
@@ -285,20 +303,24 @@ export default function Editor() {
     };
   }, [view, askDiscard]);
 
+  const applyView = useCallback((v: ProjectView) => {
+    setView(v);
+    const n = v.frames.length;
+    if (n > 0) fromRecorder.current = false;
+    if (v.selection) setSel(v.selection);
+    else setSel((s) => s.filter((i) => i < n));
+    setCurrent((c) => Math.min(v.selection?.[0] ?? c, Math.max(0, n - 1)));
+    if (v.message) showToast(v.message);
+  }, [showToast]);
+
   /** 편집을 실행하고 결과로 화면을 갱신한다 */
   const exec = useCallback(
     async (task: () => Promise<ProjectView>) => {
+      if (blockWhileAppending()) return;
       setBusy(true);
       setPlaying(false);
       try {
-        const v = await task();
-        setView(v);
-        const n = v.frames.length;
-        if (n > 0) fromRecorder.current = false;
-        if (v.selection) setSel(v.selection);
-        else setSel((s) => s.filter((i) => i < n));
-        setCurrent((c) => Math.min(v.selection?.[0] ?? c, Math.max(0, n - 1)));
-        if (v.message) showToast(v.message);
+        applyView(await task());
       } catch (e) {
         showToast(errText(e));
       } finally {
@@ -306,13 +328,15 @@ export default function Editor() {
         setBusyText("처리 중…");
       }
     },
-    [showToast],
+    [showToast, applyView, blockWhileAppending],
   );
 
   /** 파일 열기: 동영상이면 구간을, 이미지 여러 장이면 옵션을 묻고, 움직이는 그림 하나면 바로 불러온다 */
   const openPaths = useCallback(
     async (picked?: string[] | null) => {
+      if (blockWhileAppending()) return;
       const paths = picked ?? (await api.pickOpenFiles());
+      if (blockWhileAppending()) return;
       if (!paths || paths.length === 0) {
         // 녹화 틀에서 열기를 눌렀다가 취소한 경우
         returnToRecorderIfCancelled();
@@ -323,6 +347,7 @@ export default function Editor() {
         !(await confirmAsk("저장하지 않은 내용이 있습니다. 버리고 새 파일을 열까요?", "버리고 열기"))
       )
         return;
+      if (blockWhileAppending()) return;
       const sorted = sortByFileName(paths);
       const videos = sorted.filter((p) => VIDEO_EXTS.includes(extOf(p)));
       if (videos.length > 0) {
@@ -341,48 +366,75 @@ export default function Editor() {
         setImportReq({ kind: "images", paths: sorted });
       }
     },
-    [view, askDiscard, exec, showToast],
+    [view, askDiscard, exec, showToast, blockWhileAppending],
   );
 
   /** 끌어 놓은 파일을 편집 중인 프레임 맨 뒤에 붙인다 (파일 이름 순서, 되돌리기 한 번). 못 읽은 파일은 끝나고 한 번에 알린다. */
   const appendPaths = useCallback(
     async (paths: string[]) => {
-      const sorted = sortByFileName(paths);
-      let skipped: AppendResult["skipped"] = [];
-      await exec(async () => {
+      const started = beginAppend(appendGuard.current);
+      if (!started) {
+        blockWhileAppending();
+        return;
+      }
+      // 첫 await 전에 잠가서 같은 순간에 들어오는 두 번째 drop도 막는다.
+      appendGuard.current = started.guard;
+      const job = started.job;
+      setBusy(true);
+      setPlaying(false);
+      try {
+        const sorted = sortByFileName(paths);
         const r = await api.appendFiles(sorted);
-        skipped = r.skipped;
-        return r.view;
-      });
-      if (skipped.length === 0) return;
-      const shown = skipped.slice(0, 15).map((s) => `· ${s.name}: ${s.reason}`);
-      if (skipped.length > shown.length) shown.push(`… 그 밖에 ${skipped.length - shown.length}개`);
-      const head =
-        skipped.length === sorted.length
-          ? "파일을 붙이지 못했습니다. 편집 중인 프레임은 그대로입니다."
-          : `${skipped.length}개 파일은 붙이지 못하고 건너뛰었습니다.`;
-      await alertAsk(`${head}\n\n${shown.join("\n")}`);
+        if (!isCurrentAppend(appendGuard.current, job)) {
+          // 화면 작업 번호가 낡아도 Rust는 붙였을 수 있으므로 지금 내용을 다시 읽는다.
+          const v = await api.projectView();
+          setView(v);
+          const n = v.frames.length;
+          setSel((s) => s.filter((i) => i >= 0 && i < n));
+          setCurrent((c) => Math.max(0, Math.min(c, n - 1)));
+          return;
+        }
+        applyView(r.view);
+        const skipped = r.skipped;
+        if (skipped.length === 0) return;
+        const shown = skipped.slice(0, 15).map((s) => `· ${s.name}: ${s.reason}`);
+        if (skipped.length > shown.length) shown.push(`… 그 밖에 ${skipped.length - shown.length}개`);
+        const head =
+          skipped.length === sorted.length
+            ? "파일을 붙이지 못했습니다. 편집 중인 프레임은 그대로입니다."
+            : `${skipped.length}개 파일은 붙이지 못하고 건너뛰었습니다.`;
+        await alertAsk(`${head}\n\n${shown.join("\n")}`);
+      } catch (e) {
+        if (isCurrentAppend(appendGuard.current, job)) showToast(errText(e));
+      } finally {
+        if (appendGuard.current.activeId === job.id) {
+          appendGuard.current = finishAppend(appendGuard.current, job);
+          setBusy(false);
+          setBusyText("처리 중…");
+        }
+      }
     },
-    [exec],
+    [applyView, showToast, blockWhileAppending],
   );
 
   // 녹화 틀의 열기 버튼
   useEffect(() => {
     const un = listen("open-files", () => {
+      if (blockWhileAppending()) return;
       fromRecorder.current = true;
       openPaths();
     });
     return () => {
       un.then((f) => f());
     };
-  }, [openPaths]);
+  }, [openPaths, blockWhileAppending]);
 
   // 파일 끌어 놓기: 편집 중이면 맨 뒤에 붙이고, 아니면 연다.
   // 처리 중이거나 창·도구 화면이 떠 있으면 단축키처럼 받지 않는다. 한 번만 등록하고 지금 상태는 ref로 본다.
   const [dropHint, setDropHint] = useState<DropKind>(null);
   const drop = useRef<{ kind: () => DropKind; run: (paths: string[]) => void }>({ kind: () => null, run: () => {} });
   drop.current = {
-    kind: () => (busy || dialog || importReq || menu || mode || isModalOpen() ? null : frames.length > 0 ? "append" : "open"),
+    kind: () => (blocksProjectChange(appendGuard.current) || busy || dialog || importReq || menu || mode || isModalOpen() ? null : frames.length > 0 ? "append" : "open"),
     run: (paths) => (frames.length > 0 ? appendPaths(paths) : openPaths(paths)),
   };
   useEffect(() => {
@@ -469,10 +521,19 @@ export default function Editor() {
   // 단축키
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // 처리 중에는 버튼처럼 단축키도 막는다 (편집이 겹치지 않게)
-      if (busy || dialog || menu || frames.length === 0 || isModalOpen()) return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      // 처리 중에는 버튼처럼 단축키도 막는다 (편집이 겹치지 않게)
+      if (blocksProjectChange(appendGuard.current)) {
+        const ctrl = e.ctrlKey || e.metaKey;
+        const k = e.key.toLowerCase();
+        if ((ctrl && k === "o") || (!ctrl && k === "g")) {
+          e.preventDefault();
+          blockWhileAppending();
+        }
+        return;
+      }
+      if (busy || dialog || menu || frames.length === 0 || isModalOpen()) return;
       if (mode) return; // 도구 화면이 자기 단축키를 처리한다
       const k = e.key.toLowerCase();
       const ctrl = e.ctrlKey || e.metaKey;
@@ -502,7 +563,7 @@ export default function Editor() {
       else if (!ctrl && k === "b") setMode("insert");
       else if (!ctrl && k === "t") setDialog("transition");
       else if (!ctrl && k === "s") setDialog("summary");
-      else if (!ctrl && k === "g") setDialog("collage");
+      else if (!ctrl && k === "g") openNewDialog("collage");
       else if (!ctrl && k === "r") setDialog("resize");
       else if (!ctrl && k === "x") setDialog("cut");
       else if (k === "escape") setSel([]);
@@ -587,17 +648,18 @@ export default function Editor() {
         </div>
       )}
       <header className="ed-top">
-        <button className="rec" onClick={backToRecorder} title="녹화 틀을 띄워 새로 녹화">
+        <button className="rec" disabled={busy} onClick={backToRecorder} title="녹화 틀을 띄워 새로 녹화">
           <IconCircleDot size={18} />새 녹화
         </button>
-        <button onClick={() => openPaths()} title="GIF·WebP·APNG·동영상·이미지 열기 (Ctrl+O). 편집 중에 파일을 끌어 놓으면 맨 뒤에 붙습니다.">
+        <button disabled={busy} onClick={() => openPaths()} title="GIF·WebP·APNG·동영상·이미지 열기 (Ctrl+O). 편집 중에 파일을 끌어 놓으면 맨 뒤에 붙습니다.">
           <IconFolderOpen size={18} />열기
         </button>
         <select
+          disabled={busy}
           value=""
           onChange={(e) => {
             const v = e.target.value as Dialog;
-            if (v) setDialog(v);
+            if (v) openNewDialog(v);
           }}
           title="새로 만들기"
         >
@@ -688,14 +750,14 @@ export default function Editor() {
               <div className="ed-empty">
                 <p>녹화하거나 파일을 열어 시작하세요.</p>
                 <div className="row" style={{ justifyContent: "center" }}>
-                  <button className="primary" onClick={backToRecorder} title="녹화 틀을 띄워 녹화할 곳을 정합니다">
+                  <button className="primary" disabled={busy} onClick={backToRecorder} title="녹화 틀을 띄워 녹화할 곳을 정합니다">
                     <IconCircleDot size={18} />녹화
                   </button>
-                  <button onClick={() => openPaths()}>
+                  <button disabled={busy} onClick={() => openPaths()}>
                     <IconFolderOpen size={18} />파일 열기
                   </button>
-                  <button onClick={() => setDialog("newBlank")}>빈 영상 만들기</button>
-                  <button onClick={() => setDialog("collage")}>콜라주</button>
+                  <button disabled={busy} onClick={() => openNewDialog("newBlank")}>빈 영상 만들기</button>
+                  <button disabled={busy} onClick={() => openNewDialog("collage")}>콜라주</button>
                   <button onClick={() => setDialog("manage")}>
                     <IconFolders size={18} />파일 관리
                   </button>
@@ -966,6 +1028,7 @@ export default function Editor() {
           }}
           onDeleted={() => setSavedFileDeleted(dirtyBeforeSave.current)}
           onNewRecording={async () => {
+            if (blockWhileAppending()) return;
             setView(EMPTY);
             setDialog(null);
             await api.showRecorder();
@@ -1007,6 +1070,7 @@ export default function Editor() {
             returnToRecorderIfCancelled();
           }}
           onImport={(start, end, fps, w, h) => {
+            if (blockWhileAppending()) return;
             const path = importReq.path;
             setImportReq(null);
             exec(() => api.importVideo(path, start, end, fps, w, h));
@@ -1021,6 +1085,7 @@ export default function Editor() {
             returnToRecorderIfCancelled();
           }}
           onImport={(ms, fit) => {
+            if (blockWhileAppending()) return;
             const paths = importReq.paths;
             setImportReq(null);
             exec(() => api.importFiles(paths, ms, fit));
@@ -1032,8 +1097,10 @@ export default function Editor() {
           defaultFps={settings?.fps ?? 15}
           onClose={closeDialog}
           onCreate={async (w, h, fps, sec, color, transparent) => {
+            if (blockWhileAppending()) return;
             if (askDiscard && !(await confirmAsk("저장하지 않은 내용이 있습니다. 버리고 새로 만들까요?", "버리고 만들기")))
               return;
+            if (blockWhileAppending()) return;
             setDialog(null);
             exec(() => api.newBlank(w, h, fps, sec, hexToRgb(color), transparent));
           }}
@@ -1045,12 +1112,14 @@ export default function Editor() {
           onClose={closeDialog}
           onError={showToast}
           onMake={async (paths, useCurrent, bg, o) => {
+            if (blockWhileAppending()) return;
             if (
               askDiscard &&
               !useCurrent &&
               !(await confirmAsk("저장하지 않은 내용이 있습니다. 버리고 콜라주를 만들까요?", "버리고 만들기"))
             )
               return;
+            if (blockWhileAppending()) return;
             setDialog(null);
             exec(() => api.makeCollage(paths, useCurrent, bg, o));
           }}
@@ -1061,6 +1130,7 @@ export default function Editor() {
           settings={settings}
           onClose={closeDialog}
           onEdit={(path) => {
+            if (blockWhileAppending()) return;
             setDialog(null);
             openPaths([path]);
           }}
