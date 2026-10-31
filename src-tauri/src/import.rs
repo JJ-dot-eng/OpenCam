@@ -35,6 +35,8 @@ pub enum Fit {
 pub struct Loaded {
     pub frames: Vec<Frame>,
     pub warning: Option<String>,
+    /// 메모리 한도 때문에 읽기를 멈췄는지 따로 알린다.
+    pub memory_limited: bool,
 }
 
 /// 메모리 한도를 지키며 프레임을 모은다
@@ -70,7 +72,7 @@ impl Collector {
         let warning = self.full.then(|| {
             format!("메모리 한도에 걸려 앞쪽 {}장만 불러왔습니다 (설정 → 녹화 → 편집 메모리 한도)", self.frames.len())
         });
-        Ok(Loaded { frames: self.frames, warning })
+        Ok(Loaded { frames: self.frames, warning, memory_limited: self.full })
     }
 }
 
@@ -717,6 +719,7 @@ mod tests {
         assert_eq!(end, VideoReadEnd::PartialFrame);
         let loaded = finish_video(c, end, true, false, "").unwrap();
         assert_eq!(loaded.frames.len(), 2);
+        assert!(!loaded.memory_limited);
         let warning = loaded.warning.unwrap();
         assert!(warning.contains("앞쪽 2장만 불러왔습니다"), "{warning}");
         assert!(warning.contains("데이터가 끊겼습니다"), "{warning}");
@@ -728,6 +731,7 @@ mod tests {
         assert_eq!(end, VideoReadEnd::Eof);
         let loaded = finish_video(c, end, true, false, "손상된 프레임").unwrap();
         assert_eq!(loaded.frames.len(), 2);
+        assert!(!loaded.memory_limited);
         assert_eq!(
             loaded.warning.as_deref(),
             Some("동영상을 읽는 중 ffmpeg가 오류를 알렸습니다. 일부 장면이 빠지거나 깨졌을 수 있습니다 (2장 불러옴): 손상된 프레임")
@@ -789,10 +793,22 @@ mod tests {
         assert_eq!(end, VideoReadEnd::MemoryLimit);
         let loaded = finish_video(c, end, false, true, "파이프가 닫혔습니다").unwrap();
         assert_eq!(loaded.frames.len(), 1);
+        assert!(loaded.memory_limited);
         let warning = loaded.warning.unwrap();
         assert!(warning.contains("메모리 한도"), "{warning}");
         assert!(!warning.contains("끝까지 읽지 못해"), "{warning}");
         assert!(!warning.contains("파이프"), "{warning}");
+    }
+
+    #[test]
+    fn raw_video_combined_warning_keeps_memory_limit() {
+        let (c, end) = collect_test_video(vec![255; 8], 1);
+        let loaded = finish_video(c, end, false, false, "손상된 프레임").unwrap();
+        assert!(loaded.memory_limited);
+        let warning = loaded.warning.unwrap();
+        assert!(warning.contains("메모리 한도"), "{warning}");
+        assert!(warning.contains("끝까지 읽지 못해"), "{warning}");
+        assert!(warning.contains("손상된 프레임"), "{warning}");
     }
 
     #[test]
@@ -886,6 +902,7 @@ mod tests {
         let loaded = load_files(&p, 100, Fit::Contain, 1, &|_, _| {}).unwrap();
         assert_eq!(loaded.frames.len(), 1);
         assert!(loaded.warning.is_some());
+        assert!(loaded.memory_limited);
         // 한도가 넉넉하면 깨진 프레임까지 읽으므로 오류
         assert!(load_files(&p, 100, Fit::Contain, usize::MAX, &|_, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&dir);

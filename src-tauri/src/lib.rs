@@ -1088,7 +1088,7 @@ fn new_blank(
 ) -> CmdResult<ProjectView> {
     let [r, g, b] = color;
     let frames = collage::blank(width, height, fps, sec, [r, g, b, if transparent { 0 } else { 255 }]).map_err(err)?;
-    Ok(start_editing(&app, import::Loaded { frames, warning: None }, true))
+    Ok(start_editing(&app, import::Loaded { frames, warning: None, memory_limited: false }, true))
 }
 
 /// 콜라주 재료 하나 불러오기. 동영상은 앞 10초를 15FPS, 가로 640 이하로.
@@ -1136,7 +1136,7 @@ async fn make_collage(
     .await
     .map_err(err)?
     .map_err(|e| format!("{e:#}"))?;
-    Ok(start_editing(&app, import::Loaded { frames, warning: None }, true))
+    Ok(start_editing(&app, import::Loaded { frames, warning: None, memory_limited: false }, true))
 }
 
 // ---------- 파일 관리 ----------
@@ -1509,7 +1509,11 @@ async fn recovery_open(app: AppHandle, id: String) -> CmdResult<ProjectView> {
         let state = app.state::<AppState>();
         let v = start_editing(
             &app,
-            import::Loaded { frames, warning: Some("작업을 복구했습니다 (되돌리기 기록은 없습니다)".into()) },
+            import::Loaded {
+                frames,
+                warning: Some("작업을 복구했습니다 (되돌리기 기록은 없습니다)".into()),
+                memory_limited: false,
+            },
             true,
         );
         // 새로 저장하지 못하면 복구 목록에 그대로 남겨 둔다
@@ -1631,6 +1635,40 @@ fn load_for_append(
     }
 }
 
+/// 파일별 결과를 모은다. 메모리 한도에 닿았을 때만 뒤 파일을 건너뛴다.
+fn collect_append_files(
+    paths: &[String],
+    max: usize,
+    mut load: impl FnMut(usize, &str, usize) -> anyhow::Result<import::Loaded>,
+) -> (Vec<frame::Frame>, Vec<Skipped>, Option<String>) {
+    let mut frames = vec![];
+    let mut skipped = vec![];
+    let mut warnings = vec![];
+    let mut left = max;
+    for (k, path) in paths.iter().enumerate() {
+        let name = file_name(path);
+        if left == 0 {
+            skipped.push(Skipped { name, reason: "편집 메모리 한도에 닿았습니다".into() });
+            continue;
+        }
+        match load(k, path, left) {
+            Ok(l) => {
+                left = left.saturating_sub(l.frames.iter().map(|f| f.packed_bytes()).sum::<usize>());
+                if l.memory_limited {
+                    left = 0;
+                }
+                if let Some(w) = l.warning {
+                    warnings.push(format!("{name}: {w}"));
+                }
+                frames.extend(l.frames);
+            }
+            Err(e) => skipped.push(Skipped { reason: short_reason(&e, path), name }),
+        }
+    }
+    let warning = if warnings.is_empty() { None } else { Some(warnings.join("\n")) };
+    (frames, skipped, warning)
+}
+
 /// 끌어 놓은 파일들을 편집 중인 프레임 맨 뒤에 붙인다 (되돌리기 한 번). 순서는 화면이 정해서 보낸다.
 /// 읽지 못한 파일은 건너뛰고 skipped로 알린다. 모두 못 읽었으면 아무것도 바꾸지 않는다.
 #[tauri::command]
@@ -1648,30 +1686,10 @@ async fn append_files(app: AppHandle, paths: Vec<String>) -> CmdResult<AppendRes
     let progress = import_progress(&app);
     let (frames, skipped, warning) = tauri::async_runtime::spawn_blocking(move || {
         let n = paths.len().max(1);
-        let mut frames = vec![];
-        let mut skipped = vec![];
-        let mut warning = None;
-        let mut left = max;
-        for (k, path) in paths.iter().enumerate() {
-            let name = file_name(path);
-            if left == 0 {
-                skipped.push(Skipped { name, reason: "편집 메모리 한도에 닿았습니다".into() });
-                continue;
-            }
+        collect_append_files(&paths, max, |k, path, left| {
             let sub = |v: f32, m: &str| progress((k as f32 + v) / n as f32, m);
-            match load_for_append(path, size, fps, left, &sub) {
-                Ok(l) => {
-                    left = left.saturating_sub(l.frames.iter().map(|f| f.packed_bytes()).sum::<usize>());
-                    if let Some(w) = l.warning {
-                        warning = Some(format!("{name}: {w}"));
-                        left = 0;
-                    }
-                    frames.extend(l.frames);
-                }
-                Err(e) => skipped.push(Skipped { reason: short_reason(&e, path), name }),
-            }
-        }
-        (frames, skipped, warning)
+            load_for_append(path, size, fps, left, &sub)
+        })
     })
     .await
     .map_err(err)?;
@@ -1948,6 +1966,83 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_memory_limit_skips_following_files() {
+        let paths = ["동영상/먼저.mp4", "그림/다음.png", "마지막.webm"].map(str::to_string);
+        // 경고 문구가 없어도 메모리 한도 표시를 따른다.
+        for message in [Some("메모리 한도에 걸렸습니다"), None] {
+            let mut calls = 0;
+            let (frames, skipped, warning) = collect_append_files(&paths, usize::MAX, |k, path, left| {
+                calls += 1;
+                assert_eq!(k, 0);
+                assert_eq!(path, paths[0].as_str());
+                assert_eq!(left, usize::MAX);
+                Ok(import::Loaded {
+                    frames: vec![frame::Frame::from_rgba(1, 1, &[255; 4], 100)],
+                    warning: message.map(str::to_string),
+                    memory_limited: true,
+                })
+            });
+            assert_eq!(calls, 1);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(skipped.len(), 2);
+            assert_eq!(skipped[0].name, "다음.png");
+            assert_eq!(skipped[1].name, "마지막.webm");
+            assert!(skipped.iter().all(|s| s.reason == "편집 메모리 한도에 닿았습니다"));
+            assert_eq!(warning, message.map(|m| format!("먼저.mp4: {m}")));
+        }
+    }
+
+    #[test]
+    fn append_exhausted_bytes_skips_following_files() {
+        let paths = ["먼저.png", "다음.png"].map(str::to_string);
+        let f = frame::Frame::from_rgba(1, 1, &[255; 4], 100);
+        let max = f.packed_bytes();
+        let mut calls = 0;
+        let (frames, skipped, warning) = collect_append_files(&paths, max, |_, _, left| {
+            calls += 1;
+            assert_eq!(left, max);
+            Ok(import::Loaded { frames: vec![f.clone()], warning: None, memory_limited: false })
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "다음.png");
+        assert_eq!(skipped[0].reason, "편집 메모리 한도에 닿았습니다");
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn append_partial_warnings_keep_all_files_and_messages() {
+        let paths = ["동영상/먼저.mp4", "동영상/다음.webm", "그림/마지막.png"].map(str::to_string);
+        let messages = [
+            Some("동영상을 끝까지 읽지 못해 앞쪽 1장만 불러왔습니다: 데이터가 끊겼습니다"),
+            Some("일부 장면이 빠지거나 깨졌을 수 있습니다"),
+            None,
+        ];
+        let f = frame::Frame::from_rgba(1, 1, &[255; 4], 100);
+        let max = f.packed_bytes() * 4;
+        let mut calls = 0;
+        let (frames, skipped, warning) = collect_append_files(&paths, max, |k, path, left| {
+            assert_eq!(k, calls);
+            assert_eq!(path, paths[k].as_str());
+            assert_eq!(left, max - f.packed_bytes() * k);
+            calls += 1;
+            Ok(import::Loaded {
+                frames: vec![f.clone()],
+                warning: messages[k].map(str::to_string),
+                memory_limited: false,
+            })
+        });
+        assert_eq!(calls, 3);
+        assert_eq!(frames.len(), 3);
+        assert!(skipped.is_empty());
+        assert_eq!(
+            warning.as_deref(),
+            Some("먼저.mp4: 동영상을 끝까지 읽지 못해 앞쪽 1장만 불러왔습니다: 데이터가 끊겼습니다\n다음.webm: 일부 장면이 빠지거나 깨졌을 수 있습니다")
+        );
+    }
 
     #[test]
     fn append_rejects_results_from_another_project() {
