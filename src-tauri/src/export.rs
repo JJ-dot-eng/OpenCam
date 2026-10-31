@@ -272,6 +272,8 @@ fn gif_keep_tolerance(quality: u8) -> u8 {
 /// 마지막으로 쓸 때의 원본 색과 거의 같은 픽셀은 투명으로 비우고(앞 프레임이 그대로 보인다),
 /// 바뀐 부분을 감싸는 사각형만 새로 쓴다. 화면에 보이는 색(색을 줄인 결과)과 비교하면
 /// 줄일 때 생긴 오차 때문에 안 바뀐 픽셀까지 매번 다시 쓰게 되므로 원본끼리 비교한다.
+/// 다음 프레임에서 투명해질 곳이 있으면 현재 사각형에 포함하고, 표시가 끝난 뒤 그 사각형을 비운다.
+/// 비운 곳의 불투명 픽셀은 다음 프레임에서 다시 쓴다. 그 밖에는 앞 프레임을 그대로 남긴다.
 /// 색 줄이기도 바뀐 픽셀만 보고 하므로 256색을 바뀐 곳에 몰아 쓴다.
 /// 팔레트는 libimagequant로 만든 뒤 가장 가까운 색 고르기로 다듬는다(`refine_nearest`). 디더링을 켜면 다듬은 팔레트로 디더링한다.
 /// colors는 팔레트에 그대로 박아 둘 색(특정 색 보호).
@@ -303,42 +305,60 @@ fn write_gif<W: Write>(
         Some(n) => enc.set_repeat(gif::Repeat::Finite(n - 1))?,
         None => enc.set_repeat(gif::Repeat::Infinite)?,
     }
-    // 픽셀마다 마지막으로 쓸 때의 원본 색 (RGB). 처음에는 없음.
-    let mut sent: Option<Vec<[u8; 3]>> = None;
+    // 캔버스에 남아 있는 픽셀의 원본 색. None은 투명한 곳이며 숨은 RGB와는 비교하지 않는다.
+    let mut sent: Vec<Option<[u8; 3]>> = vec![None; w * h];
     let delays = gif_delays_cs(frames);
     // 어느 픽셀을 새로 쓸지는 원본만 보고 정해지므로 순서대로 빠르게 정하고,
     // 무거운 색 줄이기·압축은 여러 프레임을 한꺼번에 나눠 한다 (메모리를 위해 몇 장씩 끊어서).
     let batch = rayon::current_num_threads().max(1) * 2;
     let mut done = 0;
+    // 다음 한 장만 미리 읽고 묶음이 바뀌어도 이어 쓴다. 모든 원본을 한꺼번에 풀지 않는다.
+    let mut next_rgba = Some(frames[0].rgba());
     for chunk in (0..frames.len()).collect::<Vec<_>>().chunks(batch) {
-        let jobs: Vec<(usize, usize, usize, usize, usize, Vec<imagequant::RGBA>)> = chunk
+        let jobs: Vec<(usize, usize, usize, usize, usize, gif::DisposalMethod, Vec<imagequant::RGBA>)> = chunk
             .iter()
             .map(|&i| {
-                let px = frames[i].rgba();
-                // 새로 써야 하는 픽셀
-                let changed: Vec<bool> = match &sent {
-                    None => vec![true; w * h],
-                    Some(sh) => (0..w * h)
+                let px = next_rgba.take().unwrap();
+                next_rgba = frames.get(i + 1).map(Frame::rgba);
+                // 첫 장은 전체 영역을 쓴다. 지워진 곳은 색이 같아도 반드시 다시 쓴다.
+                let changed: Vec<bool> = if i == 0 {
+                    vec![true; w * h]
+                } else {
+                    (0..w * h)
                         .map(|k| {
                             let p = &px[k * 4..k * 4 + 4];
-                            // 투명해지는 픽셀은 GIF에서 지울 수 없으니(앞 프레임 위에 덧그림) 그대로 둔다
                             p[3] >= 128
-                                && if s.gif_remove_similar_pixels {
-                                    (0..3).any(|c| p[c].abs_diff(sh[k][c]) > tol)
-                                } else {
-                                    p[..3] != sh[k]
+                                && match sent[k] {
+                                    None => true,
+                                    Some(rgb) if s.gif_remove_similar_pixels => (0..3).any(|c| p[c].abs_diff(rgb[c]) > tol),
+                                    Some(rgb) => p[..3] != rgb,
                                 }
                         })
-                        .collect(),
+                        .collect()
                 };
-                let sh = sent.get_or_insert_with(|| vec![[0, 0, 0]; w * h]);
                 let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
                 for y in 0..h {
                     for x in 0..w {
                         let k = y * w + x;
                         if changed[k] {
                             (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
-                            sh[k] = [px[k * 4], px[k * 4 + 1], px[k * 4 + 2]];
+                            if px[k * 4 + 3] >= 128 {
+                                sent[k] = Some([px[k * 4], px[k * 4 + 1], px[k * 4 + 2]]);
+                            }
+                        }
+                    }
+                }
+                // Background는 이 프레임의 표시가 끝난 뒤 자기 사각형만 비운다.
+                // 다음 장에서 투명해질 곳까지 넓히되, 넓힌 부분은 투명 색으로 넣어 지금 화면을 유지한다.
+                let mut dispose = gif::DisposalMethod::Keep;
+                if let Some(next) = &next_rgba {
+                    for y in 0..h {
+                        for x in 0..w {
+                            let k = y * w + x;
+                            if sent[k].is_some() && next[k * 4 + 3] < 128 {
+                                dispose = gif::DisposalMethod::Background;
+                                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+                            }
                         }
                     }
                 }
@@ -356,12 +376,18 @@ fn write_gif<W: Write>(
                         rgba.push(imagequant::RGBA::new(p[0], p[1], p[2], a));
                     }
                 }
-                (i, x0, y0, x1 - x0, y1 - y0, rgba)
+                if dispose == gif::DisposalMethod::Background {
+                    // 다음 장은 표시 뒤 사각형 전체가 지워진 상태를 기준으로 판단한다.
+                    for y in y0..y1 {
+                        sent[y * w + x0..y * w + x1].fill(None);
+                    }
+                }
+                (i, x0, y0, x1 - x0, y1 - y0, dispose, rgba)
             })
             .collect();
         let encoded: Vec<Result<gif::Frame<'static>>> = jobs
             .into_par_iter()
-            .map(|(i, x0, y0, bw, bh, rgba)| -> Result<gif::Frame<'static>> {
+            .map(|(i, x0, y0, bw, bh, dispose, rgba)| -> Result<gif::Frame<'static>> {
                 let mut attr = imagequant::new();
                 attr.set_quality(0, quality.clamp(1, 100))?;
                 let px = rgba.clone();
@@ -388,7 +414,7 @@ fn write_gif<W: Write>(
                     palette: Some(palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect()),
                     transparent: palette.iter().position(|c| c.a == 0).map(|t| t as u8),
                     delay: delays[i] as u16,
-                    dispose: gif::DisposalMethod::Keep,
+                    dispose,
                     ..Default::default()
                 };
                 frame.make_lzw_pre_encoded();
@@ -1141,6 +1167,156 @@ mod tests {
         out
     }
 
+    struct CompositedGifFrame {
+        rect: (u16, u16, u16, u16),
+        dispose: gif::DisposalMethod,
+        canvas: Vec<u8>,
+    }
+
+    /// 프레임을 표시한 화면을 모은다. 처분 방법은 그 화면을 모은 뒤 다음 장을 읽기 전에 적용한다.
+    fn composite_gif(bytes: &[u8]) -> Vec<CompositedGifFrame> {
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = options.read_info(bytes).unwrap();
+        let (w, h) = (usize::from(decoder.width()), usize::from(decoder.height()));
+        let mut canvas = vec![0; w * h * 4];
+        let mut out = Vec::new();
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            let previous = (frame.dispose == gif::DisposalMethod::Previous).then(|| canvas.clone());
+            let (left, top, bw, bh) = (
+                usize::from(frame.left), usize::from(frame.top),
+                usize::from(frame.width), usize::from(frame.height),
+            );
+            for y in 0..bh {
+                for x in 0..bw {
+                    let src = (y * bw + x) * 4;
+                    let dst = ((top + y) * w + left + x) * 4;
+                    if frame.buffer[src + 3] != 0 {
+                        canvas[dst..dst + 4].copy_from_slice(&frame.buffer[src..src + 4]);
+                    }
+                }
+            }
+            out.push(CompositedGifFrame {
+                rect: (frame.left, frame.top, frame.width, frame.height),
+                dispose: frame.dispose,
+                canvas: canvas.clone(),
+            });
+            match frame.dispose {
+                gif::DisposalMethod::Background => {
+                    for y in top..top + bh {
+                        canvas[(y * w + left) * 4..(y * w + left + bw) * 4].fill(0);
+                    }
+                }
+                gif::DisposalMethod::Previous => canvas = previous.unwrap(),
+                gif::DisposalMethod::Keep | gif::DisposalMethod::Any => {}
+            }
+        }
+        out
+    }
+
+    fn assert_gif_canvas(actual: &[u8], expected: &[u8]) {
+        assert_eq!(actual.len(), expected.len());
+        for (k, (a, e)) in actual.chunks_exact(4).zip(expected.chunks_exact(4)).enumerate() {
+            assert_eq!(a[3], if e[3] >= 128 { 255 } else { 0 }, "픽셀 {k}의 알파");
+            if e[3] >= 128 {
+                assert!((0..3).all(|c| a[c].abs_diff(e[c]) <= 2), "픽셀 {k}의 색: {a:?}, 기대: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gif_clears_new_transparency_and_draws_opaque_frames_again() {
+        let s = Settings::default();
+        let red = [255, 0, 0, 255].repeat(64);
+        let mut blue = [255, 0, 0, 0].repeat(64);
+        for y in 2..6 {
+            for x in 2..6 {
+                blue[(y * 8 + x) * 4..(y * 8 + x + 1) * 4].copy_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+        // 알파 127도 완전히 투명한 픽셀과 같이 처리한다.
+        blue[3] = 127;
+        let input: Vec<Frame> = [&red, &blue, &red].iter().map(|px| Frame::from_rgba(8, 8, px, 100)).collect();
+        let mut bytes = Vec::new();
+        write_gif(&input, &mut bytes, 80, &[], gif_keep_tolerance(80), &s, &|_, _| {}).unwrap();
+        let decoded = composite_gif(&bytes);
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0].dispose, gif::DisposalMethod::Background);
+        assert_eq!(decoded[1].dispose, gif::DisposalMethod::Keep);
+        assert_eq!(decoded[2].dispose, gif::DisposalMethod::Keep);
+        for (frame, expected) in decoded.iter().zip([&red, &blue, &red]) {
+            assert_gif_canvas(&frame.canvas, expected);
+        }
+    }
+
+    #[test]
+    fn gif_draws_opaque_pixel_even_when_hidden_rgb_is_the_same() {
+        for remove_similar in [false, true] {
+            let mut s = Settings::default();
+            s.gif_remove_similar_pixels = remove_similar;
+            let transparent = [0, 0, 0, 0].repeat(64);
+            let mut black = transparent.clone();
+            black[(5 * 8 + 3) * 4 + 3] = 255;
+            let input = vec![Frame::from_rgba(8, 8, &transparent, 100), Frame::from_rgba(8, 8, &black, 100)];
+            let mut bytes = Vec::new();
+            write_gif(&input, &mut bytes, 80, &[], gif_keep_tolerance(80), &s, &|_, _| {}).unwrap();
+            let decoded = composite_gif(&bytes);
+            assert_eq!(decoded.len(), 2);
+            assert!(decoded.iter().all(|f| f.dispose == gif::DisposalMethod::Keep));
+            assert_eq!(decoded[1].rect, (3, 5, 1, 1));
+            assert_gif_canvas(&decoded[0].canvas, &transparent);
+            assert_gif_canvas(&decoded[1].canvas, &black);
+        }
+    }
+
+    #[test]
+    fn gif_expands_unchanged_frame_and_redraws_cleared_opaque_pixels() {
+        let s = Settings::default();
+        let red = [255, 0, 0, 255].repeat(64);
+        let mut holes = red.clone();
+        holes[(5 * 8 + 5) * 4 + 3] = 0;
+        holes[(6 * 8 + 6) * 4 + 3] = 0;
+        let input: Vec<Frame> = [&red, &red, &holes, &holes].iter().map(|px| Frame::from_rgba(8, 8, px, 100)).collect();
+        let mut bytes = Vec::new();
+        write_gif(&input, &mut bytes, 80, &[], gif_keep_tolerance(80), &s, &|_, _| {}).unwrap();
+        let decoded = composite_gif(&bytes);
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(decoded[0].dispose, gif::DisposalMethod::Keep);
+        assert_eq!(decoded[1].dispose, gif::DisposalMethod::Background);
+        assert_eq!(decoded[1].rect, (5, 5, 2, 2), "빈 프레임도 지워야 할 두 픽셀까지 넓힌다");
+        assert_eq!(decoded[2].rect, (5, 5, 2, 2), "사각형 안에서 지워진 나머지 두 빨강 픽셀을 다시 쓴다");
+        assert_eq!(decoded[2].dispose, gif::DisposalMethod::Keep);
+        assert_eq!(decoded[3].rect, (0, 0, 1, 1));
+        assert_eq!(decoded[3].dispose, gif::DisposalMethod::Keep);
+        for (frame, expected) in decoded.iter().zip([&red, &red, &holes, &holes]) {
+            assert_gif_canvas(&frame.canvas, expected);
+        }
+    }
+
+    #[test]
+    fn gif_checks_transparency_across_parallel_batch_boundary() {
+        let s = Settings::default();
+        let batch = rayon::current_num_threads().max(1) * 2;
+        let red = [255, 0, 0, 255].repeat(16);
+        let mut holes = red.clone();
+        holes[(2 * 4 + 2) * 4 + 3] = 0;
+        let mut input = vec![Frame::from_rgba(4, 4, &red, 100); batch];
+        input.push(Frame::from_rgba(4, 4, &holes, 100));
+        let mut bytes = Vec::new();
+        write_gif(&input, &mut bytes, 80, &[], gif_keep_tolerance(80), &s, &|_, _| {}).unwrap();
+        let decoded = composite_gif(&bytes);
+        assert_eq!(decoded.len(), batch + 1);
+        assert!(decoded[..batch - 1].iter().all(|f| f.dispose == gif::DisposalMethod::Keep));
+        assert_eq!(decoded[batch - 1].dispose, gif::DisposalMethod::Background);
+        assert_eq!(decoded[batch - 1].rect, (2, 2, 1, 1));
+        for frame in &decoded[..batch] {
+            assert_gif_canvas(&frame.canvas, &red);
+        }
+        assert_eq!(decoded[batch].dispose, gif::DisposalMethod::Keep);
+        assert_eq!(decoded[batch].rect, (0, 0, 1, 1));
+        assert_gif_canvas(&decoded[batch].canvas, &holes);
+    }
+
     #[test]
     fn gif_direct_handles_many_colors_and_writes_only_changed_area() {
         let s = Settings::default();
@@ -1165,6 +1341,9 @@ mod tests {
         assert_eq!(rects[0], (0, 0, 32, 32));
         assert_eq!(rects[1], (20, 10, 4, 4), "바뀐 4×4만 새로 쓴다");
         assert_eq!(rects[2], (0, 0, 1, 1), "거의 같으면 시간만 잇는 빈 프레임");
+        let decoded = composite_gif(&std::fs::read(&path).unwrap());
+        assert_eq!(decoded.len(), 3);
+        assert!(decoded.iter().all(|f| f.dispose == gif::DisposalMethod::Keep));
         assert_eq!(decoded_gif_delays_ms(&path), vec![100, 100, 100]);
         std::fs::remove_file(path).unwrap();
     }
