@@ -31,10 +31,12 @@ pub enum Fit {
     Stretch,
 }
 
-/// 불러온 결과. 메모리 한도에 걸려 일부만 불러왔으면 warning이 있다.
+/// 불러온 결과. 메모리 한도나 읽기 오류로 일부만 불러왔으면 warning이 있다.
 pub struct Loaded {
     pub frames: Vec<Frame>,
     pub warning: Option<String>,
+    /// 메모리 한도 때문에 읽기를 멈췄는지 따로 알린다.
+    pub memory_limited: bool,
 }
 
 /// 메모리 한도를 지키며 프레임을 모은다
@@ -70,7 +72,7 @@ impl Collector {
         let warning = self.full.then(|| {
             format!("메모리 한도에 걸려 앞쪽 {}장만 불러왔습니다 (설정 → 녹화 → 편집 메모리 한도)", self.frames.len())
         });
-        Ok(Loaded { frames: self.frames, warning })
+        Ok(Loaded { frames: self.frames, warning, memory_limited: self.full })
     }
 }
 
@@ -256,13 +258,27 @@ fn ffmpeg_command() -> Result<Command> {
 }
 
 /// `ffmpeg -i`가 알려 주는 정보에서 크기·길이·FPS를 읽는다 (ffprobe 없이)
+// 지금은 테스트에서만 쓰므로 일반 빌드에서는 미사용 경고를 끈다.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_ffmpeg_info(text: &str) -> Option<VideoInfo> {
-    let dur = text.split("Duration: ").nth(1)?.split(',').next()?.trim();
-    let mut parts = dur.split(':');
-    let h: f64 = parts.next()?.parse().ok()?;
-    let m: f64 = parts.next()?.parse().ok()?;
+    parse_ffmpeg_info_inner(text).map(|(info, _)| info)
+}
+
+fn parse_ffmpeg_timestamp(text: &str) -> Option<u64> {
+    let mut parts = text.trim().split(':');
+    let h: u64 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
     let s: f64 = parts.next()?.parse().ok()?;
-    let duration_ms = ((h * 3600.0 + m * 60.0 + s) * 1000.0) as u64;
+    if parts.next().is_some() || m >= 60 || !s.is_finite() || !(0.0..60.0).contains(&s) {
+        return None;
+    }
+    Some(((h as f64 * 3600.0 + m as f64 * 60.0 + s) * 1000.0).round() as u64)
+}
+
+/// 길이를 모르면 내부에서는 None, 공개 정보에서는 0으로 나타낸다.
+fn parse_ffmpeg_info_inner(text: &str) -> Option<(VideoInfo, Option<u64>)> {
+    let duration =
+        text.split("Duration: ").nth(1).and_then(|s| s.split(',').next()).and_then(parse_ffmpeg_timestamp);
     let line = text.lines().find(|l| l.contains("Stream") && l.contains("Video:"))?;
     let (mut width, mut height, mut fps) = (0, 0, 30.0f32);
     for item in line.split(',') {
@@ -292,14 +308,55 @@ pub fn parse_ffmpeg_info(text: &str) -> Option<VideoInfo> {
     if rotated {
         std::mem::swap(&mut width, &mut height);
     }
-    Some(VideoInfo { width, height, duration_ms, fps: fps.clamp(1.0, 240.0) })
+    let fps = if fps.is_finite() { fps.clamp(1.0, 240.0) } else { 30.0 };
+    Some((VideoInfo { width, height, duration_ms: duration.unwrap_or(0), fps }, duration))
+}
+
+/// 일반 진행 출력의 time=과 -progress의 out_time=을 모두 읽는다.
+fn parse_ffmpeg_progress_time(text: &str) -> Option<u64> {
+    text.split("time=")
+        .skip(1)
+        .filter_map(|s| s.split_whitespace().next().and_then(parse_ffmpeg_timestamp))
+        .last()
+}
+
+/// 길이가 없는 영상을 끝까지 훑는다. 스트림 복사로 못 읽으면 디코드해서 다시 확인한다.
+fn scan_video_duration(path: &str) -> Result<u64> {
+    for copy in [true, false] {
+        let mut cmd = ffmpeg_command()?;
+        // 일반 진행 출력은 끄고, 길이 확인에 쓸 진행 정보는 stdout으로 받는다.
+        cmd.args(["-v", "error", "-nostats", "-progress", "pipe:1"])
+            .args(["-i", path, "-map", "0:v:0", "-an", "-sn", "-dn"]);
+        if copy {
+            cmd.args(["-c:v", "copy"]);
+        }
+        // output()으로 stdout과 stderr를 함께 읽고, 키보드 입력도 기다리지 않는다.
+        let out = cmd.args(["-f", "null", "-"]).stdin(Stdio::null()).output().context("ffmpeg 실행 실패")?;
+        if out.status.success()
+            && let Some(ms) = parse_ffmpeg_progress_time(&String::from_utf8_lossy(&out.stdout))
+            && ms > 0
+        {
+            return Ok(ms);
+        }
+    }
+    bail!("동영상 길이를 확인할 수 없습니다. 다른 동영상 파일로 저장한 뒤 다시 열어 주세요.")
 }
 
 pub fn probe_video(path: &str) -> Result<VideoInfo> {
-    let out =
-        ffmpeg_command()?.args(["-hide_banner", "-i", path]).stdout(Stdio::null()).stderr(Stdio::piped()).output()?;
+    let out = ffmpeg_command()?
+        .args(["-hide_banner", "-i", path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
     let text = String::from_utf8_lossy(&out.stderr);
-    parse_ffmpeg_info(&text).ok_or_else(|| anyhow!("동영상 정보를 읽을 수 없습니다"))
+    let (mut info, duration) =
+        parse_ffmpeg_info_inner(&text).ok_or_else(|| anyhow!("동영상 정보를 읽을 수 없습니다"))?;
+    if duration.is_none() || info.duration_ms == 0 {
+        info.duration_ms = scan_video_duration(path)?;
+    }
+    info.duration_ms = info.duration_ms.max((1000.0 / info.fps as f64).ceil() as u64);
+    Ok(info)
 }
 
 /// 구간을 고를 때 보여줄 장면 하나 (가로 max_w 이하 PNG)
@@ -313,6 +370,104 @@ pub fn video_frame_png(path: &str, at_ms: u64, max_w: u32) -> Result<Vec<u8>> {
         bail!("장면을 가져올 수 없습니다: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(out.stdout)
+}
+
+#[derive(Debug, PartialEq)]
+enum VideoReadEnd {
+    Eof,
+    PartialFrame,
+    ReadError(String),
+    MemoryLimit,
+}
+
+fn collect_raw_frames(
+    mut reader: impl Read,
+    w: u32,
+    h: u32,
+    frame_len: usize,
+    fps: f32,
+    expected: f32,
+    c: &mut Collector,
+    progress: Progress,
+) -> VideoReadEnd {
+    let mut buf = vec![0u8; frame_len];
+    let mut k = 0u64;
+    let stamp = |k: u64| (k as f64 * 1000.0 / fps as f64).round() as u32;
+    loop {
+        let mut filled = 0;
+        while filled < frame_len {
+            match reader.read(&mut buf[filled..]) {
+                Ok(0) => return if filled == 0 { VideoReadEnd::Eof } else { VideoReadEnd::PartialFrame },
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return VideoReadEnd::ReadError(e.to_string()),
+            }
+        }
+        // 고정 FPS지만 반올림 오차가 쌓이지 않게 시각 차이로 시간을 정한다
+        let ms = stamp(k + 1) - stamp(k);
+        k += 1;
+        progress((k as f32 / expected).min(0.99), "동영상 불러오는 중");
+        if !c.push(Frame::from_rgba(w, h, &buf, ms.max(10))) {
+            return VideoReadEnd::MemoryLimit;
+        }
+    }
+}
+
+fn short_video_error(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = text.chars();
+    let mut short: String = chars.by_ref().take(240).collect();
+    if chars.next().is_some() {
+        short.push('…');
+    }
+    short
+}
+
+fn finish_video(
+    c: Collector,
+    read_end: VideoReadEnd,
+    exit_ok: bool,
+    killed_for_limit: bool,
+    stderr_tail: &str,
+) -> Result<Loaded> {
+    // 직접 멈춘 ffmpeg의 실패 종료와 파이프 오류 대신 메모리 경고를 보여 준다.
+    if killed_for_limit && c.full {
+        return c.finish();
+    }
+    let read_error = match &read_end {
+        VideoReadEnd::PartialFrame => Some("프레임을 읽는 도중 데이터가 끊겼습니다"),
+        VideoReadEnd::ReadError(e) => Some(e.as_str()),
+        _ => None,
+    };
+    let reason = if !stderr_tail.trim().is_empty() {
+        Some(short_video_error(stderr_tail))
+    } else if let Some(e) = read_error {
+        Some(short_video_error(e))
+    } else if !exit_ok {
+        Some("ffmpeg가 정상적으로 끝나지 않았습니다".to_string())
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        if c.frames.is_empty() {
+            bail!("ffmpeg 오류: {reason}");
+        }
+        let warning = if matches!(&read_end, VideoReadEnd::Eof) && exit_ok {
+            format!(
+                "동영상을 읽는 중 ffmpeg가 오류를 알렸습니다. 일부 장면이 빠지거나 깨졌을 수 있습니다 ({}장 불러옴): {reason}",
+                c.frames.len()
+            )
+        } else {
+            format!("동영상을 끝까지 읽지 못해 앞쪽 {}장만 불러왔습니다: {reason}", c.frames.len())
+        };
+        let mut loaded = c.finish()?;
+        loaded.warning = Some(match loaded.warning {
+            Some(memory_warning) => format!("{memory_warning}\n{warning}"),
+            None => warning,
+        });
+        return Ok(loaded);
+    }
+    c.finish()
 }
 
 /// 동영상의 [start, end) 구간을 fps로 뽑아 w×h 프레임으로 불러온다
@@ -353,22 +508,11 @@ pub fn load_video(
     };
     let mut out = child.stdout.take().unwrap();
     let expected = ((end_ms - start_ms) as f32 / 1000.0 * fps).ceil().max(1.0);
-    let mut buf = vec![0u8; frame_len];
     let mut c = Collector::new(max_bytes);
-    let mut k = 0u64;
-    let stamp = |k: u64| (k as f64 * 1000.0 / fps as f64).round() as u32;
-    loop {
-        if out.read_exact(&mut buf).is_err() {
-            break; // 끝
-        }
-        // 고정 FPS지만 반올림 오차가 쌓이지 않게 시각 차이로 시간을 정한다
-        let ms = stamp(k + 1) - stamp(k);
-        k += 1;
-        progress((k as f32 / expected).min(0.99), "동영상 불러오는 중");
-        if !c.push(Frame::from_rgba(w, h, &buf, ms.max(10))) {
-            let _ = child.kill();
-            break;
-        }
+    let read_end = collect_raw_frames(&mut out, w, h, frame_len, fps, expected, &mut c, progress);
+    let killed_for_limit = matches!(&read_end, VideoReadEnd::MemoryLimit);
+    if killed_for_limit {
+        let _ = child.kill();
     }
     // 읽기가 오류로 끝났어도 ffmpeg가 stdout에 막혀 멈추지 않게 먼저 닫는다
     drop(out);
@@ -378,12 +522,15 @@ pub fn load_video(
         let _ = child.wait();
     }
     // ffmpeg가 끝나 stderr가 닫히면 스레드도 끝난다
-    let err = err_tail.join().unwrap_or_default();
-    let status = status?;
-    if c.frames.is_empty() && !status.success() {
-        bail!("ffmpeg 오류: {err}");
-    }
-    c.finish()
+    let mut err = err_tail.join().unwrap_or_default();
+    let exit_ok = match status {
+        Ok(status) => status.success(),
+        Err(e) => {
+            err.push_str(&format!("\nffmpeg 종료를 확인할 수 없습니다: {e}"));
+            false
+        }
+    };
+    finish_video(c, read_end, exit_ok, killed_for_limit, &err)
 }
 
 /// 동영상 전체를 tw×th 안에 비율을 지켜 불러오고 남는 곳은 투명하게 채운다 (편집 중인 프레임 뒤에 붙일 때).
@@ -526,6 +673,155 @@ mod tests {
     }
 
     #[test]
+    fn parse_ffmpeg_unknown_duration() {
+        let text = "Input #0, matroska,webm, from 'a.webm':\n  Duration: N/A, start: 0.000000, bitrate: N/A\n  Stream #0:0: Video: vp8, yuv420p(progressive), 640x360, SAR 1:1 DAR 16:9, 30 fps, 30 tbr, 1k tbn (default)\n";
+        for text in [text.to_string(), text.replace("  Duration: N/A, start: 0.000000, bitrate: N/A\n", "")] {
+            let (info, duration) = parse_ffmpeg_info_inner(&text).unwrap();
+            assert_eq!(duration, None);
+            assert_eq!(info, VideoInfo { width: 640, height: 360, duration_ms: 0, fps: 30.0 });
+            assert_eq!(parse_ffmpeg_info(&text), Some(info));
+        }
+        assert!(parse_ffmpeg_info("Duration: N/A\nStream #0:0: Audio: opus").is_none());
+    }
+
+    #[test]
+    fn parse_ffmpeg_last_progress_time() {
+        let text = "frame=1 time=N/A speed=0x\rframe=5 time=00:00:00.50 speed=1x\r\nframe=12 time=00:01:02.50 speed=2x\rtime=N/A\n";
+        assert_eq!(parse_ffmpeg_progress_time(text), Some(62500));
+        let progress = "out_time=00:00:00.100000\nprogress=continue\nout_time=00:00:01.000000\nprogress=end\n";
+        assert_eq!(parse_ffmpeg_progress_time(progress), Some(1000));
+        assert_eq!(parse_ffmpeg_progress_time("time=N/A\rout_time=-00:00:00.10\ntime=NaN"), None);
+        assert_eq!(parse_ffmpeg_progress_time("time=00:00:00.000000"), Some(0));
+        assert_eq!(parse_ffmpeg_timestamp("00:00:NaN"), None);
+        assert_eq!(parse_ffmpeg_timestamp("00:60:00"), None);
+    }
+
+    fn collect_test_video(bytes: Vec<u8>, max_bytes: usize) -> (Collector, VideoReadEnd) {
+        let mut c = Collector::new(max_bytes);
+        let end = collect_raw_frames(std::io::Cursor::new(bytes), 1, 1, 4, 10.0, 100.0, &mut c, &|_, _| {});
+        (c, end)
+    }
+
+    #[test]
+    fn raw_video_clean_eof_has_no_warning() {
+        let (c, end) = collect_test_video(vec![255; 8], usize::MAX);
+        assert_eq!(end, VideoReadEnd::Eof);
+        // 요청한 구간보다 짧아도 깨끗하게 끝났으면 정상이다.
+        let loaded = finish_video(c, end, true, false, "").unwrap();
+        assert_eq!(loaded.frames.len(), 2);
+        assert!(loaded.frames.iter().all(|f| f.delay_ms == 100));
+        assert!(loaded.warning.is_none());
+    }
+
+    #[test]
+    fn raw_video_partial_frame_warns() {
+        let (c, end) = collect_test_video(vec![255; 11], usize::MAX);
+        assert_eq!(end, VideoReadEnd::PartialFrame);
+        let loaded = finish_video(c, end, true, false, "").unwrap();
+        assert_eq!(loaded.frames.len(), 2);
+        assert!(!loaded.memory_limited);
+        let warning = loaded.warning.unwrap();
+        assert!(warning.contains("앞쪽 2장만 불러왔습니다"), "{warning}");
+        assert!(warning.contains("데이터가 끊겼습니다"), "{warning}");
+    }
+
+    #[test]
+    fn raw_video_clean_eof_with_stderr_warns() {
+        let (c, end) = collect_test_video(vec![255; 8], usize::MAX);
+        assert_eq!(end, VideoReadEnd::Eof);
+        let loaded = finish_video(c, end, true, false, "손상된 프레임").unwrap();
+        assert_eq!(loaded.frames.len(), 2);
+        assert!(!loaded.memory_limited);
+        assert_eq!(
+            loaded.warning.as_deref(),
+            Some("동영상을 읽는 중 ffmpeg가 오류를 알렸습니다. 일부 장면이 빠지거나 깨졌을 수 있습니다 (2장 불러옴): 손상된 프레임")
+        );
+    }
+
+    #[test]
+    fn raw_video_failed_exit_warns() {
+        for stderr in ["", "손상된 프레임"] {
+            let (c, end) = collect_test_video(vec![255; 8], usize::MAX);
+            let loaded = finish_video(c, end, false, false, stderr).unwrap();
+            assert_eq!(loaded.frames.len(), 2);
+            let warning = loaded.warning.unwrap();
+            assert!(warning.contains("앞쪽 2장만 불러왔습니다"), "{warning}");
+            if !stderr.is_empty() {
+                assert!(warning.contains(stderr), "{warning}");
+            }
+        }
+    }
+
+    #[test]
+    fn raw_video_read_error_warns() {
+        struct FailingReader(std::io::Cursor<Vec<u8>>, bool);
+        impl Read for FailingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.1 {
+                    self.1 = true;
+                    return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "다시 읽기"));
+                }
+                // 한 번에 한 바이트만 읽혀도 프레임 경계를 정확히 따라야 한다.
+                let n = self.0.read(&mut buf[..1])?;
+                if n == 0 {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "읽기 실패"));
+                }
+                Ok(n)
+            }
+        }
+        let mut c = Collector::new(usize::MAX);
+        let reader = FailingReader(std::io::Cursor::new(vec![255; 8]), false);
+        let end = collect_raw_frames(reader, 1, 1, 4, 10.0, 100.0, &mut c, &|_, _| {});
+        assert_eq!(end, VideoReadEnd::ReadError("읽기 실패".to_string()));
+        let loaded = finish_video(c, end, true, false, "").unwrap();
+        assert_eq!(loaded.frames.len(), 2);
+        assert!(loaded.warning.unwrap().contains("읽기 실패"));
+    }
+
+    #[test]
+    fn raw_video_failure_without_frames_is_error() {
+        let cases = [(vec![], false, "실패"), (vec![255; 3], true, ""), (vec![], true, "실패"), (vec![], true, "")];
+        for (bytes, exit_ok, stderr) in cases {
+            let (c, end) = collect_test_video(bytes, usize::MAX);
+            assert!(finish_video(c, end, exit_ok, false, stderr).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_video_memory_limit_keeps_memory_warning() {
+        let (c, end) = collect_test_video(vec![255; 8], 1);
+        assert_eq!(end, VideoReadEnd::MemoryLimit);
+        let loaded = finish_video(c, end, false, true, "파이프가 닫혔습니다").unwrap();
+        assert_eq!(loaded.frames.len(), 1);
+        assert!(loaded.memory_limited);
+        let warning = loaded.warning.unwrap();
+        assert!(warning.contains("메모리 한도"), "{warning}");
+        assert!(!warning.contains("끝까지 읽지 못해"), "{warning}");
+        assert!(!warning.contains("파이프"), "{warning}");
+    }
+
+    #[test]
+    fn raw_video_combined_warning_keeps_memory_limit() {
+        let (c, end) = collect_test_video(vec![255; 8], 1);
+        let loaded = finish_video(c, end, false, false, "손상된 프레임").unwrap();
+        assert!(loaded.memory_limited);
+        let warning = loaded.warning.unwrap();
+        assert!(warning.contains("메모리 한도"), "{warning}");
+        assert!(warning.contains("끝까지 읽지 못해"), "{warning}");
+        assert!(warning.contains("손상된 프레임"), "{warning}");
+    }
+
+    #[test]
+    fn video_error_is_short_and_keeps_korean_characters() {
+        let (c, end) = collect_test_video(vec![255; 8], usize::MAX);
+        let loaded = finish_video(c, end, false, false, &"손상\n".repeat(1000)).unwrap();
+        let warning = loaded.warning.unwrap();
+        assert!(warning.chars().count() < 300);
+        assert!(warning.ends_with('…'));
+        assert!(!warning.contains('\n'));
+    }
+
+    #[test]
     fn fit_contain_letterbox() {
         // 2x1 빨강을 2x2에 넣으면 비율을 지켜 한 줄만 차고, 남는 줄은 투명
         let px = [255u8, 0, 0, 255].repeat(2);
@@ -606,6 +902,7 @@ mod tests {
         let loaded = load_files(&p, 100, Fit::Contain, 1, &|_, _| {}).unwrap();
         assert_eq!(loaded.frames.len(), 1);
         assert!(loaded.warning.is_some());
+        assert!(loaded.memory_limited);
         // 한도가 넉넉하면 깨진 프레임까지 읽으므로 오류
         assert!(load_files(&p, 100, Fit::Contain, usize::MAX, &|_, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -650,6 +947,41 @@ mod tests {
         let loaded = load_video(&ps, 0, 1000, 10.0, 8, 4, 1, &|_, _| {}).unwrap();
         assert_eq!(loaded.frames.len(), 1);
         assert!(loaded.warning.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_duration_video_if_ffmpeg() {
+        if find_ffmpeg().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("opencam_vduration_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("no_duration.m4v");
+        // 생 MPEG-4 영상에는 전체 길이가 없다. 파이프로 써서 컨테이너 정보를 만들지 않는다.
+        let made = ffmpeg_command()
+            .unwrap()
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=32x24:rate=10", "-t", "1"])
+            .args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-f", "m4v", "-"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        std::fs::write(&p, &made.stdout).unwrap();
+        let ps = p.to_string_lossy().into_owned();
+        let header =
+            ffmpeg_command().unwrap().args(["-hide_banner", "-i", &ps]).stdin(Stdio::null()).output().unwrap();
+        let (_, duration) = parse_ffmpeg_info_inner(&String::from_utf8_lossy(&header.stderr)).unwrap();
+        assert_eq!(duration, None);
+        let info = probe_video(&ps).unwrap();
+        assert_eq!((info.width, info.height), (32, 24));
+        assert!((900..=1100).contains(&info.duration_ms), "{info:?}");
+        let opened = load_video(&ps, 0, info.duration_ms, 10.0, 32, 24, usize::MAX, &|_, _| {}).unwrap();
+        assert_eq!(opened.frames.len(), 10);
+        assert!(opened.warning.is_none());
+        let appended = load_video_contain(&ps, 10.0, 32, 24, usize::MAX, &|_, _| {}).unwrap();
+        assert_eq!(appended.frames.len(), 10);
+        assert!(appended.warning.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
