@@ -928,6 +928,59 @@ pub fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+pub(crate) struct CompositedGifFrame {
+    pub(crate) rect: (u16, u16, u16, u16),
+    pub(crate) dispose: gif::DisposalMethod,
+    pub(crate) canvas: Vec<u8>,
+    pub(crate) size: (u16, u16),
+    pub(crate) delay_cs: u16,
+}
+
+/// 프레임을 표시한 화면을 모은다. 처분 방법은 그 화면을 모은 뒤 다음 장을 읽기 전에 적용한다.
+#[cfg(test)]
+pub(crate) fn composite_gif(bytes: &[u8]) -> Vec<CompositedGifFrame> {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut decoder = options.read_info(bytes).unwrap();
+    let (w, h) = (usize::from(decoder.width()), usize::from(decoder.height()));
+    let mut canvas = vec![0; w * h * 4];
+    let mut out = Vec::new();
+    while let Some(frame) = decoder.read_next_frame().unwrap() {
+        let previous = (frame.dispose == gif::DisposalMethod::Previous).then(|| canvas.clone());
+        let (left, top, bw, bh) = (
+            usize::from(frame.left), usize::from(frame.top),
+            usize::from(frame.width), usize::from(frame.height),
+        );
+        for y in 0..bh {
+            for x in 0..bw {
+                let src = (y * bw + x) * 4;
+                let dst = ((top + y) * w + left + x) * 4;
+                if frame.buffer[src + 3] != 0 {
+                    canvas[dst..dst + 4].copy_from_slice(&frame.buffer[src..src + 4]);
+                }
+            }
+        }
+        out.push(CompositedGifFrame {
+            rect: (frame.left, frame.top, frame.width, frame.height),
+            dispose: frame.dispose,
+            canvas: canvas.clone(),
+            size: (w as u16, h as u16),
+            delay_cs: frame.delay,
+        });
+        match frame.dispose {
+            gif::DisposalMethod::Background => {
+                for y in top..top + bh {
+                    canvas[(y * w + left) * 4..(y * w + left + bw) * 4].fill(0);
+                }
+            }
+            gif::DisposalMethod::Previous => canvas = previous.unwrap(),
+            gif::DisposalMethod::Keep | gif::DisposalMethod::Any => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1163,53 +1216,6 @@ mod tests {
         let mut out = Vec::new();
         while let Some(f) = decoder.read_next_frame().unwrap() {
             out.push((f.left, f.top, f.width, f.height));
-        }
-        out
-    }
-
-    struct CompositedGifFrame {
-        rect: (u16, u16, u16, u16),
-        dispose: gif::DisposalMethod,
-        canvas: Vec<u8>,
-    }
-
-    /// 프레임을 표시한 화면을 모은다. 처분 방법은 그 화면을 모은 뒤 다음 장을 읽기 전에 적용한다.
-    fn composite_gif(bytes: &[u8]) -> Vec<CompositedGifFrame> {
-        let mut options = gif::DecodeOptions::new();
-        options.set_color_output(gif::ColorOutput::RGBA);
-        let mut decoder = options.read_info(bytes).unwrap();
-        let (w, h) = (usize::from(decoder.width()), usize::from(decoder.height()));
-        let mut canvas = vec![0; w * h * 4];
-        let mut out = Vec::new();
-        while let Some(frame) = decoder.read_next_frame().unwrap() {
-            let previous = (frame.dispose == gif::DisposalMethod::Previous).then(|| canvas.clone());
-            let (left, top, bw, bh) = (
-                usize::from(frame.left), usize::from(frame.top),
-                usize::from(frame.width), usize::from(frame.height),
-            );
-            for y in 0..bh {
-                for x in 0..bw {
-                    let src = (y * bw + x) * 4;
-                    let dst = ((top + y) * w + left + x) * 4;
-                    if frame.buffer[src + 3] != 0 {
-                        canvas[dst..dst + 4].copy_from_slice(&frame.buffer[src..src + 4]);
-                    }
-                }
-            }
-            out.push(CompositedGifFrame {
-                rect: (frame.left, frame.top, frame.width, frame.height),
-                dispose: frame.dispose,
-                canvas: canvas.clone(),
-            });
-            match frame.dispose {
-                gif::DisposalMethod::Background => {
-                    for y in top..top + bh {
-                        canvas[(y * w + left) * 4..(y * w + left + bw) * 4].fill(0);
-                    }
-                }
-                gif::DisposalMethod::Previous => canvas = previous.unwrap(),
-                gif::DisposalMethod::Keep | gif::DisposalMethod::Any => {}
-            }
         }
         out
     }

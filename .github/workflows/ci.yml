@@ -58,5 +58,7 @@ jobs:
         run: cargo build --locked
 
       - name: Rust 테스트
+        env:
+          OPENCAM_REQUIRE_FFMPEG: "1"
         working-directory: src-tauri
         run: cargo test --locked
