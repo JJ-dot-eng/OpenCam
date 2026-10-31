@@ -141,6 +141,12 @@ export interface ProjectView {
   memoryBytes: number;
 }
 
+/** 파일 끌어 놓기로 맨 뒤에 붙인 결과. skipped는 못 읽어 건너뛴 파일 (이름과 까닭). */
+export interface AppendResult {
+  view: ProjectView;
+  skipped: { name: string; reason: string }[];
+}
+
 export type Format = "gif" | "webp" | "apng" | "mp4" | "webm" | "png" | "avif";
 
 export const FORMAT_EXT: Record<Format, string> = {
@@ -396,6 +402,8 @@ export const api = {
       width: Math.round(width),
       height: Math.round(height),
     }),
+  /** 파일들을 편집 중인 프레임 맨 뒤에 붙인다 (주는 순서대로, 되돌리기 한 번). 못 읽은 파일은 skipped로. */
+  appendFiles: (paths: string[]) => invoke<AppendResult>("append_files", { paths }),
   newBlank: (width: number, height: number, fps: number, sec: number, color: Rgb, transparent: boolean) =>
     invoke<ProjectView>("new_blank", { width, height, fps, sec, color, transparent }),
   makeCollage: (paths: string[], useCurrent: boolean, backgroundImage: string | null, options: CollageOptions) =>
