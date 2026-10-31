@@ -687,6 +687,22 @@ impl Project {
         true
     }
 
+    /// 맨 뒤에 프레임을 붙인다 (파일 끌어 놓기, 되돌리기 한 번). 붙인 프레임의 번호들.
+    /// 붙일 것이 없거나 크기가 다른 프레임이 있으면 붙이지 않고 None.
+    pub fn append(&mut self, items: Vec<Frame>) -> Option<Vec<usize>> {
+        let (w, h) = match (self.frames.first(), items.first()) {
+            (_, None) => return None,
+            (Some(f), _) | (None, Some(f)) => (f.width, f.height),
+        };
+        if items.iter().any(|f| (f.width, f.height) != (w, h)) {
+            return None;
+        }
+        self.checkpoint();
+        let start = self.frames.len();
+        self.frames.extend(items);
+        Some((start..self.frames.len()).collect())
+    }
+
     pub fn rotate(&mut self, r: Rotate) {
         self.map_all(move |w, h, px| rotate_rgba(w, h, &px, r));
     }
@@ -960,6 +976,25 @@ mod tests {
         p.delete(&[0]);
         assert!(p.undo());
         assert_eq!(p.frames.len(), 3);
+    }
+
+    #[test]
+    fn append_is_one_undo_step() {
+        let mut p = Project { undo_enabled: true, ..Default::default() };
+        p.load((1..=2).map(|d| solid(4, 4, 0, d * 10)).collect());
+        let order = |p: &Project| p.frames.iter().map(|f| f.delay_ms / 10).collect::<Vec<_>>();
+        assert_eq!(p.append((3..=5).map(|d| solid(4, 4, 0, d * 10)).collect()), Some(vec![2, 3, 4]));
+        assert_eq!(order(&p), vec![1, 2, 3, 4, 5]);
+        assert!(p.dirty);
+        // 한 번 되돌리면 붙이기 전으로
+        assert!(p.undo());
+        assert_eq!(order(&p), vec![1, 2]);
+        assert!(!p.can_undo());
+        // 크기가 다르거나 붙일 것이 없으면 그대로
+        assert_eq!(p.append(vec![solid(2, 2, 0, 10)]), None);
+        assert_eq!(p.append(vec![]), None);
+        assert_eq!(order(&p), vec![1, 2]);
+        assert!(p.can_redo());
     }
 
     #[test]

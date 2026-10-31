@@ -165,8 +165,19 @@ pub fn fit_rgba(w: u32, h: u32, px: &[u8], tw: u32, th: u32, fit: Fit) -> Vec<u8
 
 /// GIF·WebP·APNG·이미지 파일들을 차례로 불러온다. 크기는 첫 그림에 맞춘다.
 pub fn load_files(paths: &[String], still_ms: u32, fit: Fit, max_bytes: usize, progress: Progress) -> Result<Loaded> {
+    load_files_sized(paths, still_ms, fit, None, max_bytes, progress)
+}
+
+/// load_files와 같지만 size가 있으면 첫 그림 대신 그 크기에 맞춘다 (편집 중인 프레임 뒤에 붙일 때)
+pub fn load_files_sized(
+    paths: &[String],
+    still_ms: u32,
+    fit: Fit,
+    mut size: Option<(u32, u32)>,
+    max_bytes: usize,
+    progress: Progress,
+) -> Result<Loaded> {
     let mut c = Collector::new(max_bytes);
-    let mut size: Option<(u32, u32)> = None;
     for (k, p) in paths.iter().enumerate() {
         let path = Path::new(p);
         if is_video(path) {
@@ -337,6 +348,31 @@ pub fn load_video(
     c.finish()
 }
 
+/// 동영상 전체를 tw×th 안에 비율을 지켜 불러오고 남는 곳은 투명하게 채운다 (편집 중인 프레임 뒤에 붙일 때).
+/// FPS는 fps와 원본 FPS 중 작은 쪽 (동영상 열기 창의 처음 값과 같게).
+pub fn load_video_contain(
+    path: &str,
+    fps: f32,
+    tw: u32,
+    th: u32,
+    max_bytes: usize,
+    progress: Progress,
+) -> Result<Loaded> {
+    let info = probe_video(path)?;
+    let fps = fps.min(info.fps.round()).max(1.0);
+    let s = (tw as f32 / info.width as f32).min(th as f32 / info.height as f32);
+    let nw = ((info.width as f32 * s).round() as u32).clamp(1, tw);
+    let nh = ((info.height as f32 * s).round() as u32).clamp(1, th);
+    let mut loaded = load_video(path, 0, info.duration_ms, fps, nw, nh, max_bytes, progress)?;
+    if (nw, nh) != (tw, th) {
+        use rayon::prelude::*;
+        loaded.frames.par_iter_mut().for_each(|f| {
+            *f = f.map_pixels(|w, h, px| (tw, th, fit_rgba(w, h, &px, tw, th, Fit::Contain)));
+        });
+    }
+    Ok(loaded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +438,11 @@ mod tests {
         let loaded = load_files(&paths, 250, Fit::Stretch, usize::MAX, &|_, _| {}).unwrap();
         assert_eq!(loaded.frames.len(), 2);
         assert!(loaded.frames.iter().all(|f| (f.width, f.height, f.delay_ms) == (4, 4, 250)));
+        // 크기를 정해 주면 첫 그림 대신 그 크기에 맞춘다 (8×2 → 4×4 안에 4×1, 위아래는 투명)
+        let loaded = load_files_sized(&paths[1..], 100, Fit::Contain, Some((4, 4)), usize::MAX, &|_, _| {}).unwrap();
+        assert_eq!(loaded.frames.len(), 1);
+        assert_eq!((loaded.frames[0].width, loaded.frames[0].height), (4, 4));
+        assert_eq!(loaded.frames[0].rgba()[3], 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

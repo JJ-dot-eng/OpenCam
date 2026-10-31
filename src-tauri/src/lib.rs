@@ -1530,6 +1530,110 @@ async fn import_video(
     Ok(start_editing(&app, loaded, false))
 }
 
+/// 붙이지 못하고 건너뛴 파일
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Skipped {
+    name: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppendResult {
+    view: ProjectView,
+    skipped: Vec<Skipped>,
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+}
+
+/// 오류를 알림 창에 보여줄 짧은 글로 (경로는 빼고, ffmpeg 출력처럼 긴 것은 자른다)
+fn short_reason(e: &anyhow::Error, path: &str) -> String {
+    let text = format!("{e}").replace(&format!(": {path}"), "").replace(path, "");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        "읽을 수 없는 파일입니다".into()
+    } else if text.chars().count() > 120 {
+        format!("{}…", text.chars().take(120).collect::<String>())
+    } else {
+        text
+    }
+}
+
+/// 파일 하나를 (w, h) 크기로 불러온다. 비율을 지키고 남는 곳은 투명하게.
+/// 정지 이미지는 한 장에 100ms, 동영상은 전체를 fps(원본보다 높지 않게)로.
+fn load_for_append(
+    path: &str,
+    size: (u32, u32),
+    fps: f32,
+    max: usize,
+    progress: export::Progress,
+) -> anyhow::Result<import::Loaded> {
+    let p = Path::new(path);
+    if import::is_video(p) {
+        import::load_video_contain(path, fps, size.0, size.1, max, progress)
+    } else if import::IMAGE_EXTS.contains(&import::ext_of(p).as_str()) {
+        import::load_files_sized(&[path.to_string()], 100, import::Fit::Contain, Some(size), max, progress)
+    } else {
+        anyhow::bail!("지원하지 않는 형식입니다")
+    }
+}
+
+/// 끌어 놓은 파일들을 편집 중인 프레임 맨 뒤에 붙인다 (되돌리기 한 번). 순서는 화면이 정해서 보낸다.
+/// 읽지 못한 파일은 건너뛰고 skipped로 알린다. 모두 못 읽었으면 아무것도 바꾸지 않는다.
+#[tauri::command]
+async fn append_files(app: AppHandle, paths: Vec<String>) -> CmdResult<AppendResult> {
+    let (size, used) = {
+        let state = app.state::<AppState>();
+        let p = state.project.lock();
+        let f = p.frames.first().ok_or("편집 중인 프레임이 없습니다")?;
+        ((f.width, f.height), p.memory_bytes() as usize)
+    };
+    let fps = app.state::<AppState>().settings.lock().fps as f32;
+    // 편집 메모리 한도에서 이미 쓰는 만큼을 뺀 만큼만 더 불러온다 (대략)
+    let max = memory_limit(&app).saturating_sub(used);
+    let progress = import_progress(&app);
+    let (frames, skipped, warning) = tauri::async_runtime::spawn_blocking(move || {
+        let n = paths.len().max(1);
+        let mut frames = vec![];
+        let mut skipped = vec![];
+        let mut warning = None;
+        let mut left = max;
+        for (k, path) in paths.iter().enumerate() {
+            let name = file_name(path);
+            if left == 0 {
+                skipped.push(Skipped { name, reason: "편집 메모리 한도에 닿았습니다".into() });
+                continue;
+            }
+            let sub = |v: f32, m: &str| progress((k as f32 + v) / n as f32, m);
+            match load_for_append(path, size, fps, left, &sub) {
+                Ok(l) => {
+                    left = left.saturating_sub(l.frames.iter().map(|f| f.packed_bytes()).sum::<usize>());
+                    if let Some(w) = l.warning {
+                        warning = Some(format!("{name}: {w}"));
+                        left = 0;
+                    }
+                    frames.extend(l.frames);
+                }
+                Err(e) => skipped.push(Skipped { reason: short_reason(&e, path), name }),
+            }
+        }
+        (frames, skipped, warning)
+    })
+    .await
+    .map_err(err)?;
+    let state = app.state::<AppState>();
+    let mut p = state.project.lock();
+    let selection = if frames.is_empty() {
+        None
+    } else {
+        Some(p.append(frames).ok_or("편집 중인 프레임의 크기가 바뀌어 붙이지 못했습니다")?)
+    };
+    Ok(AppendResult { view: view(&p, selection, warning), skipped })
+}
+
 /// 줌 미리보기: 가장 크게 확대된 순간의 모습
 #[tauri::command]
 async fn zoom_preview(app: AppHandle, id: u64, zoom: ZoomFx) -> CmdResult<tauri::ipc::Response> {
@@ -1767,6 +1871,7 @@ pub fn run() {
             video_frame,
             import_files,
             import_video,
+            append_files,
             new_blank,
             make_collage,
             list_files,

@@ -8,11 +8,16 @@
 - v0.1.5 공개 릴리스(버그 14개 수정). 릴리스까지의 커밋은 GitHub `main`에 있다.
 - 할 일 목록과 다음 기능 기획을 `docs/`로 옮겨 공개했고, AI 작업 안내 [AGENTS.md](AGENTS.md)와 이 인계 파일을 만들었다.
 - 깨진 동영상 불러오기 멈춤과 영상 저장 중 ffmpeg 출력 멈춤을 고쳤다 (ffmpeg 오류 출력을 따로 읽고 끝 8KB만 남김).
-  브랜치 `fix/video-import-stderr-deadlock`, PR #1 (https://github.com/JJ-dot-eng/OpenCam/pull/1). 아직 main에 합치지 않았다.
+  PR #1이 main에 d64eb94로 합쳐졌다. 두 수정 모두 Windows 빌드·테스트 확인은 아직이다.
+- 파일 끌어 놓기로 맨 뒤에 추가: 편집 중에 파일을 끌어 놓으면 파일 이름 순서로 맨 뒤에 붙는다(되돌리기 한 번,
+  못 읽은 파일은 건너뛰고 한 번에 알림, 끌어 오는 동안 표시). 브랜치 `feat/drag-drop-append`, PR 아직 안 합침.
+  Rust 쪽(`append_files`, `Project::append`, `load_files_sized`, `load_video_contain`)은 이 Linux 환경에서 컴파일하지 못했다.
 
 ## 남은 일
-- Windows PC에서 `cd src-tauri && cargo test`로 빌드·테스트를 확인한 뒤 PR #1 합치기
-  (이 수정은 빌드가 안 되는 Linux 환경에서 만들어 컴파일·테스트를 못 했다).
+- Windows PC에서 `cd src-tauri && cargo test`, `npx tsc --noEmit`, `node --test tests/file-order.test.mjs`,
+  실제 앱에서 끌어 놓기(편집 중·빈 화면, 동영상 여러 개, 깨진 파일 섞기, 되돌리기 한 번) 확인 후 PR 합치기.
+  PR #1(이미 합침)의 두 수정도 이때 함께 확인한다.
+- Rust 테스트가 하나 늘어 76개가 된다. AGENTS.md의 "75개"는 사용자 허락을 받고 고친다.
 - 보류한 버그: 정전 시 복구 파일 동기화, 녹화 틀 옮길 때 잠깐 끊김, 저장 결과에 단축키 오류.
 - 실제 앱으로 확인 못 한 것: 세로(돌린) 모니터 녹화, 복구 카드에서 "복구"를 누른 뒤의 동작(자동 테스트로만 확인).
 - 새 기능 후보는 [docs/next-features.md](docs/next-features.md). 아직 고르지 않았다.
@@ -22,3 +27,4 @@
 - 할 일·기획 문서는 공개 저장소 `docs/`에 둔다. 공개 문서라서 개인정보와 다른 제품 이름은 적지 않는다 (2026-10-31).
 - 여러 AI가 번갈아 일한다. 규칙은 AGENTS.md "여러 AI가 함께 일하는 규칙" (2026-10-31).
 - 코드 서명은 하지 않는다 (2026-10-29).
+- 끌어 놓은 동영상 여러 개도 파일 이름 순서(숫자는 크기대로)로 맨 뒤에 붙인다. 편집 중이 아니면 지금처럼 연다 (2026-10-31).
