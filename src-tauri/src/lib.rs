@@ -1321,10 +1321,10 @@ fn pick_file(app: AppHandle, filters: Vec<(String, Vec<String>)>) -> Option<Stri
 
 // ---------- 설정 내보내기·가져오기 ----------
 
+/// 설정 창에서 고치고 있는 값(settings)을 파일로 쓴다. 지금 쓰는 설정은 바꾸지 않는다.
 #[tauri::command]
-fn export_settings(state: State<AppState>, path: String) -> CmdResult<()> {
-    let s = state.settings.lock().clone();
-    std::fs::write(&path, serde_json::to_string_pretty(&s).map_err(err)?)
+fn export_settings(path: String, settings: Settings) -> CmdResult<()> {
+    std::fs::write(&path, serde_json::to_string_pretty(&settings).map_err(err)?)
         .map_err(|e| format!("설정 정보를 내보내지 못했습니다!: {e}"))
 }
 
@@ -1849,6 +1849,17 @@ mod tests {
         assert!(autosave_due(Some((5, false)), (5, true), long));
         // 끄면 바로 지운다
         assert!(autosave_due(Some((5, true)), (5, false), long));
+    }
+
+    #[test]
+    fn export_settings_writes_the_given_values() {
+        // 설정 창에서 저장하지 않고 고친 값을 내보낸다 (지금 쓰는 설정을 거치지 않는다)
+        let path = std::env::temp_dir().join(format!("opencam_export_settings_{}.json", std::process::id()));
+        let s = Settings { fps: 23, ..Settings::default() };
+        export_settings(path.to_string_lossy().into_owned(), s).unwrap();
+        let back: Settings = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(back.fps, 23);
     }
 
     #[test]

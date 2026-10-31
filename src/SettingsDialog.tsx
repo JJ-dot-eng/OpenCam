@@ -113,8 +113,7 @@ export default function SettingsDialog({ settings, onClose, onSaved }: Props) {
                   try {
                     const p = await api.pickSaveFile("opencam-settings.json", [["OpenCam 설정", ["json"]]]);
                     if (!p) return;
-                    await api.setSettings(s);
-                    await api.exportSettings(p);
+                    await api.exportSettings(p, s);
                     setError(null);
                     alertAsk("모든 환경 설정을 내보냈습니다.");
                   } catch (e) {

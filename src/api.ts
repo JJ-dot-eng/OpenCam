@@ -411,7 +411,8 @@ export const api = {
     invoke<number>("export_frames", { indices, dir, prefix, format }),
   pickSaveFile: (current: string, filters: FileFilter[]) => invoke<string | null>("pick_save_file", { current, filters }),
   pickFile: (filters: FileFilter[]) => invoke<string | null>("pick_file", { filters }),
-  exportSettings: (path: string) => invoke<void>("export_settings", { path }),
+  /** 설정 창에서 고치고 있는 값을 파일로 내보낸다 (지금 쓰는 설정은 바꾸지 않음) */
+  exportSettings: (path: string, settings: Settings) => invoke<void>("export_settings", { path, settings }),
   importSettings: (path: string) => invoke<Settings>("import_settings", { path }),
   /** 그림(RGBA 픽셀)을 프레임들에 덧씌운다. 픽셀은 JSON이 아니라 그대로 보낸다. */
   applyOverlay: (rgba: Uint8Array, meta: OverlayMeta) =>
