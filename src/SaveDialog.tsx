@@ -1,6 +1,6 @@
 // 저장 창: 형식·화질·파일 크기 줄이기 → 저장 → 저장 뒤 할 일.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, errText, ExportOptions, extOf, Format, FORMAT_EXT, formatBytes, FrameInfo, hexToRgb, Settings } from "./api";
 import { Check, Modal, NumField } from "./dialogs";
@@ -33,10 +33,12 @@ interface Props {
   frames: FrameInfo[];
   onClose: () => void;
   onSaved: () => void;
+  /** 방금 저장한 파일을 지웠다 (다시 저장하지 않은 상태로) */
+  onDeleted: () => void;
   onNewRecording: () => void;
 }
 
-export default function SaveDialog({ settings, frames, onClose, onSaved, onNewRecording }: Props) {
+export default function SaveDialog({ settings, frames, onClose, onSaved, onDeleted, onNewRecording }: Props) {
   const [format, setFormat] = useState<Format>("gif");
   const [quality, setQuality] = useState(settings.gifQuality);
   const [path, setPath] = useState("");
@@ -63,7 +65,6 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onNewRe
   // 형식이 바뀌면 확장자와 화질 기본값도 바꾼다
   useEffect(() => {
     setQuality(defaultQuality(settings, format));
-    setEstimate(null);
     const ext = FORMAT_EXT[format];
     if (!path) api.defaultSavePath(ext).then(setPath);
     else setPath((p) => p.replace(/\.[^.\\/]+$/, "") + "." + ext);
@@ -80,16 +81,27 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onNewRe
     protectColors: format === "gif" ? protect.map(hexToRgb) : [],
   });
 
+  // 옵션이 바뀌면 예상 크기는 더 이상 맞지 않으니 지우고, 계산 중이던 결과도 버린다
+  const optsKey = JSON.stringify(opts());
+  const estimateRun = useRef(0);
+  useEffect(() => {
+    estimateRun.current++;
+    setEstimate(null);
+  }, [optsKey]);
+
   const needsFfmpeg = format === "mp4" || format === "webm" || format === "avif";
   const hasQuality = format !== "apng" && format !== "png";
   const tooFast = format === "gif" && !limitFps && frames.some((f) => f.delayMs < 20);
   const working = progress !== null && !done && !error;
 
   const calc = async () => {
+    const run = ++estimateRun.current;
     setEstimate("계산 중…");
     try {
-      setEstimate(formatBytes(await api.estimateSize(opts())));
+      const size = await api.estimateSize(opts());
+      if (run === estimateRun.current) setEstimate(formatBytes(size));
     } catch (e) {
+      if (run !== estimateRun.current) return;
       setEstimate(null);
       setError(errText(e));
     }
@@ -171,6 +183,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onNewRe
               if (!(await confirmAsk("방금 저장한 파일을 지울까요?", "지우기"))) return;
               try {
                 await api.deleteFile(done.path);
+                onDeleted();
                 onClose();
               } catch (e) {
                 setError(errText(e));
@@ -224,10 +237,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onNewRe
             max={100}
             value={quality}
             disabled={working}
-            onChange={(e) => {
-              setQuality(Number(e.target.value));
-              setEstimate(null);
-            }}
+            onChange={(e) => setQuality(Number(e.target.value))}
           />
           <em>{quality}</em>
         </label>

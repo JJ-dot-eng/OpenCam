@@ -126,6 +126,13 @@ export default function Editor() {
   const [importReq, setImportReq] = useState<ImportRequest>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * 저장한 뒤 그 파일을 저장 창에서 바로 지웠나. Rust 쪽은 저장했을 때 "저장됨"으로 바꾼 뒤 그대로라서,
+   * 다른 작업을 열거나 다시 저장할 때까지 화면에서 기억해 두고 버릴 때 묻는다.
+   */
+  const [savedFileDeleted, setSavedFileDeleted] = useState(false);
+  /** 저장하기 직전에 저장 안 한 내용이 있었나 (저장한 파일을 지우면 그 상태로 돌아간다) */
+  const dirtyBeforeSave = useRef(false);
   /** 녹화 틀의 열기·☰ 메뉴·설정에서 넘어왔나. 그랬다면 취소할 때 녹화 틀로 돌아간다. */
   const fromRecorder = useRef(false);
   const [stage, setStage] = useState({ w: 800, h: 500 });
@@ -151,6 +158,7 @@ export default function Editor() {
     fromRecorder.current = false;
     const v = await api.projectView();
     setView(v);
+    setSavedFileDeleted(false);
     setSel([]);
     setCurrent(0);
     setPlaying(false);
@@ -226,7 +234,7 @@ export default function Editor() {
   }, []);
 
   /** 저장하지 않은 녹화·편집 내용을 버리기 전에 물어야 하나 (설정에서 끌 수 있다) */
-  const askDiscard = view.frames.length > 0 && view.dirty && !settings?.doNotAskDiscardRecording;
+  const askDiscard = view.frames.length > 0 && (view.dirty || savedFileDeleted) && !settings?.doNotAskDiscardRecording;
 
   /** 녹화 틀에서 넘어왔다가 아무것도 불러오지 않고 끝냈으면 녹화 틀로 돌아간다 */
   const returnToRecorderIfCancelled = () => {
@@ -411,12 +419,13 @@ export default function Editor() {
   };
 
   /** 썸네일 끌어 놓기: 잡은 프레임이 선택에 들어 있으면 선택한 프레임을 함께 옮긴다 */
-  const moveFrames = (i: number, to: number) => run({ op: "moveTo", sel: sel.includes(i) ? sel : [i], to });
+  const moveFrames = (i: number, to: number) => !busy && run({ op: "moveTo", sel: sel.includes(i) ? sel : [i], to });
 
   // 단축키
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (dialog || menu || frames.length === 0 || isModalOpen()) return;
+      // 처리 중에는 버튼처럼 단축키도 막는다 (편집이 겹치지 않게)
+      if (busy || dialog || menu || frames.length === 0 || isModalOpen()) return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if (mode) return; // 도구 화면이 자기 단축키를 처리한다
@@ -642,7 +651,7 @@ export default function Editor() {
                   </button>
                 </div>
                 <p className="hint">GIF·WebP·APNG·동영상·이미지 파일을 여기로 끌어 놓아도 됩니다.</p>
-                <RecoveryList onOpen={(id) => exec(() => api.recoveryOpen(id))} onError={showToast} />
+                <RecoveryList busy={busy} onOpen={(id) => exec(() => api.recoveryOpen(id))} onError={showToast} />
               </div>
             ) : mode === "crop" && cur ? (
               <CropView
@@ -900,7 +909,12 @@ export default function Editor() {
           settings={settings}
           frames={frames}
           onClose={() => setDialog(null)}
-          onSaved={() => setView((v) => ({ ...v, dirty: false }))}
+          onSaved={() => {
+            dirtyBeforeSave.current = view.dirty || savedFileDeleted;
+            setSavedFileDeleted(false);
+            setView((v) => ({ ...v, dirty: false }));
+          }}
+          onDeleted={() => setSavedFileDeleted(dirtyBeforeSave.current)}
           onNewRecording={async () => {
             setView(EMPTY);
             setDialog(null);
@@ -1054,12 +1068,14 @@ function FrameMenu({ x, y, busy, onPick, onClose }: { x: number; y: number; busy
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // 먼저 받아 멈춘다: 열린 도구 화면까지 Esc로 닫히지 않게
         e.preventDefault();
+        e.stopPropagation();
         onClose();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
   const items: [string, string, Icon, string][] = [...FRAME_ACTIONS, ["delete", "삭제", IconTrash, "Delete"]];
   return (
