@@ -3,6 +3,8 @@
 mod capture;
 mod collage;
 mod effects;
+#[cfg(test)]
+mod e2e_tests;
 mod export;
 mod filters;
 mod frame;
