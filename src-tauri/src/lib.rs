@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -978,12 +979,30 @@ fn recycle(path: &str) -> CmdResult<()> {
     if r == 0 { Ok(()) } else { Err(format!("휴지통으로 옮기지 못했습니다 (코드 {r})")) }
 }
 
+/// 프로젝트 잠금을 기다리는 이미지 요청이 편집에 필요한 Rayon 스레드를 막지 않게 따로 돌린다.
+fn spawn_frame_job(job: impl FnOnce() + Send + 'static) {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("frame-{i}"))
+            .build()
+            .expect("프레임 이미지용 스레드를 만들지 못했습니다")
+    })
+    .spawn(job);
+}
+
 /// 편집 창 미리보기용 프레임 이미지: frame://localhost/<id> (원본), /<id>/t (썸네일)
 fn frame_png(app: &AppHandle, path: &str) -> Option<Vec<u8>> {
+    frame_png_from(&app.state::<AppState>().project, path)
+}
+
+fn frame_png_from(project: &Mutex<Project>, path: &str) -> Option<Vec<u8>> {
     let mut parts = path.trim_start_matches('/').split('/');
     let id: u64 = parts.next()?.parse().ok()?;
     let thumb = parts.next() == Some("t");
-    let f = app.state::<AppState>().project.lock().find(id)?.clone();
+    let f = project.lock().find(id)?.clone();
     let (mut w, mut h, mut px) = (f.width, f.height, f.rgba());
     if thumb {
         let scale = (160.0 / w as f32).min(120.0 / h as f32).min(1.0);
@@ -1838,7 +1857,7 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("frame", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
             let path = req.uri().path().to_string();
-            rayon::spawn(move || {
+            spawn_frame_job(move || {
                 let resp = match frame_png(&app, &path) {
                     Some(png) => tauri::http::Response::builder()
                         .header("Content-Type", "image/png")
@@ -1968,6 +1987,66 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_request_does_not_block_parallel_edit() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let timeout = Duration::from_secs(20);
+        // 전역 풀을 바꾸지 않고 Rayon 스레드가 하나뿐인 상황을 만든다.
+        let edit_pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+        let mut p = Project::default();
+        let px = [20, 40, 60, 255].repeat(320 * 240);
+        p.load((0..3).map(|_| frame::Frame::from_rgba(320, 240, &px, 100)).collect());
+        // 첫 장은 편집하지 않아 이미지 요청의 id가 그대로 남는다.
+        let path = format!("/{}/t", p.frames[0].id);
+        let project = Arc::new(Mutex::new(p));
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        let (edited_tx, edited_rx) = mpsc::channel();
+        let edit_project = Arc::clone(&project);
+        let pool = Arc::clone(&edit_pool);
+        // 실패해도 이 스레드와 지역 풀만 남고, 다른 테스트의 전역 풀은 막지 않는다.
+        let editor = std::thread::spawn(move || {
+            let mut guard = edit_project.lock();
+            let _ = locked_tx.send(());
+            go_rx.recv_timeout(timeout).expect("편집 시작 신호를 받지 못했습니다");
+            // 스레드 사이로 잠금 가드를 옮기지 않고 Project만 빌려 준다.
+            let p = &mut *guard;
+            pool.install(|| p.apply_filters(&[1, 2], &[Filter::Invert]));
+            let pixel = p.frames[1].rgba()[..4].to_vec();
+            drop(guard);
+            let _ = edited_tx.send(pixel);
+        });
+
+        locked_rx.recv_timeout(timeout).expect("편집이 프로젝트 잠금을 잡지 못했습니다");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (png_tx, png_rx) = mpsc::channel();
+        edit_pool.install(|| {
+            spawn_frame_job(move || {
+                let _ = started_tx.send(());
+                let png = frame_png_from(&project, &path);
+                let _ = png_tx.send(png);
+            });
+        });
+        started_rx.recv_timeout(timeout).expect("프레임 이미지 요청이 시작되지 않았습니다");
+        std::thread::sleep(Duration::from_millis(200));
+        go_tx.send(()).expect("편집 시작 신호를 보내지 못했습니다");
+
+        let pixel = edited_rx
+            .recv_timeout(timeout)
+            .expect("이미지 요청이 Rayon 스레드를 막아 편집이 끝나지 않았습니다");
+        assert_eq!(pixel, [235, 215, 195, 255]);
+        let png = png_rx
+            .recv_timeout(timeout)
+            .expect("편집 뒤에도 프레임 이미지 요청이 끝나지 않았습니다")
+            .expect("편집하지 않은 프레임의 PNG가 없습니다");
+        let image = image::load_from_memory(&png).expect("프레임 이미지를 PNG로 읽지 못했습니다").into_rgba8();
+        assert_eq!(image.dimensions(), (160, 120));
+        assert_eq!(image.get_pixel(80, 60).0, [20, 40, 60, 255]);
+        editor.join().expect("편집 스레드가 끝나지 못했습니다");
+    }
 
     #[test]
     fn append_memory_limit_skips_following_files() {
