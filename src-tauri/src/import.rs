@@ -385,6 +385,7 @@ fn collect_raw_frames(
     w: u32,
     h: u32,
     frame_len: usize,
+    pad_to: Option<(u32, u32)>,
     fps: f32,
     expected: f32,
     c: &mut Collector,
@@ -407,7 +408,14 @@ fn collect_raw_frames(
         let ms = stamp(k + 1) - stamp(k);
         k += 1;
         progress((k as f32 / expected).min(0.99), "동영상 불러오는 중");
-        if !c.push(Frame::from_rgba(w, h, &buf, ms.max(10))) {
+        // 투명 여백도 저장할 프레임에 들어가므로 한도를 세기 전에 채운다.
+        let frame = if let Some((tw, th)) = pad_to {
+            let px = fit_rgba(w, h, &buf, tw, th, Fit::Contain);
+            Frame::from_rgba(tw, th, &px, ms.max(10))
+        } else {
+            Frame::from_rgba(w, h, &buf, ms.max(10))
+        };
+        if !c.push(frame) {
             return VideoReadEnd::MemoryLimit;
         }
     }
@@ -481,6 +489,20 @@ pub fn load_video(
     max_bytes: usize,
     progress: Progress,
 ) -> Result<Loaded> {
+    load_video_inner(path, start_ms, end_ms, fps, w, h, None, max_bytes, progress)
+}
+
+fn load_video_inner(
+    path: &str,
+    start_ms: u64,
+    end_ms: u64,
+    fps: f32,
+    w: u32,
+    h: u32,
+    pad_to: Option<(u32, u32)>,
+    max_bytes: usize,
+    progress: Progress,
+) -> Result<Loaded> {
     if end_ms <= start_ms {
         bail!("구간이 비었습니다");
     }
@@ -509,7 +531,7 @@ pub fn load_video(
     let mut out = child.stdout.take().unwrap();
     let expected = ((end_ms - start_ms) as f32 / 1000.0 * fps).ceil().max(1.0);
     let mut c = Collector::new(max_bytes);
-    let read_end = collect_raw_frames(&mut out, w, h, frame_len, fps, expected, &mut c, progress);
+    let read_end = collect_raw_frames(&mut out, w, h, frame_len, pad_to, fps, expected, &mut c, progress);
     let killed_for_limit = matches!(&read_end, VideoReadEnd::MemoryLimit);
     if killed_for_limit {
         let _ = child.kill();
@@ -549,14 +571,8 @@ pub fn load_video_contain(
     let s = (tw as f32 / info.width as f32).min(th as f32 / info.height as f32);
     let nw = ((info.width as f32 * s).round() as u32).clamp(1, tw);
     let nh = ((info.height as f32 * s).round() as u32).clamp(1, th);
-    let mut loaded = load_video(path, 0, info.duration_ms, fps, nw, nh, max_bytes, progress)?;
-    if (nw, nh) != (tw, th) {
-        use rayon::prelude::*;
-        loaded.frames.par_iter_mut().for_each(|f| {
-            *f = f.map_pixels(|w, h, px| (tw, th, fit_rgba(w, h, &px, tw, th, Fit::Contain)));
-        });
-    }
-    Ok(loaded)
+    let pad_to = ((nw, nh) != (tw, th)).then_some((tw, th));
+    load_video_inner(path, 0, info.duration_ms, fps, nw, nh, pad_to, max_bytes, progress)
 }
 
 #[cfg(test)]
@@ -698,7 +714,7 @@ mod tests {
 
     fn collect_test_video(bytes: Vec<u8>, max_bytes: usize) -> (Collector, VideoReadEnd) {
         let mut c = Collector::new(max_bytes);
-        let end = collect_raw_frames(std::io::Cursor::new(bytes), 1, 1, 4, 10.0, 100.0, &mut c, &|_, _| {});
+        let end = collect_raw_frames(std::io::Cursor::new(bytes), 1, 1, 4, None, 10.0, 100.0, &mut c, &|_, _| {});
         (c, end)
     }
 
@@ -771,7 +787,7 @@ mod tests {
         }
         let mut c = Collector::new(usize::MAX);
         let reader = FailingReader(std::io::Cursor::new(vec![255; 8]), false);
-        let end = collect_raw_frames(reader, 1, 1, 4, 10.0, 100.0, &mut c, &|_, _| {});
+        let end = collect_raw_frames(reader, 1, 1, 4, None, 10.0, 100.0, &mut c, &|_, _| {});
         assert_eq!(end, VideoReadEnd::ReadError("읽기 실패".to_string()));
         let loaded = finish_video(c, end, true, false, "").unwrap();
         assert_eq!(loaded.frames.len(), 2);
@@ -798,6 +814,48 @@ mod tests {
         assert!(warning.contains("메모리 한도"), "{warning}");
         assert!(!warning.contains("끝까지 읽지 못해"), "{warning}");
         assert!(!warning.contains("파이프"), "{warning}");
+    }
+
+    fn padded_video_test_input() -> (Vec<u8>, usize) {
+        let px = vec![255; 8];
+        let padded = fit_rgba(2, 1, &px, 256, 256, Fit::Contain);
+        let max_bytes = Frame::from_rgba(256, 256, &padded, 100).packed_bytes() * 2;
+        // 여백도 잘 압축되므로 실제 압축 크기로 두 경우가 갈리는지 확인한다.
+        assert!(Frame::from_rgba(2, 1, &px, 100).packed_bytes() * 6 < max_bytes);
+        (px.repeat(6), max_bytes)
+    }
+
+    #[test]
+    fn raw_video_padding_counts_toward_memory_limit() {
+        let (bytes, max_bytes) = padded_video_test_input();
+        let mut c = Collector::new(max_bytes);
+        let end = collect_raw_frames(
+            std::io::Cursor::new(bytes), 2, 1, 8, Some((256, 256)), 10.0, 100.0, &mut c, &|_, _| {},
+        );
+        assert_eq!(end, VideoReadEnd::MemoryLimit);
+        assert_eq!(c.bytes, max_bytes);
+        let loaded = finish_video(c, end, false, true, "파이프가 닫혔습니다").unwrap();
+        assert_eq!(loaded.frames.len(), 2);
+        assert!(loaded.frames.iter().all(|f| (f.width, f.height) == (256, 256)));
+        assert!(loaded.memory_limited);
+        let warning = loaded.warning.unwrap();
+        assert!(warning.contains("메모리 한도"), "{warning}");
+        assert!(!warning.contains("파이프"), "{warning}");
+    }
+
+    #[test]
+    fn raw_video_without_padding_keeps_original_memory_usage() {
+        let (bytes, max_bytes) = padded_video_test_input();
+        let mut c = Collector::new(max_bytes);
+        let end = collect_raw_frames(std::io::Cursor::new(bytes), 2, 1, 8, None, 10.0, 100.0, &mut c, &|_, _| {});
+        assert_eq!(end, VideoReadEnd::Eof);
+        assert!(c.bytes < max_bytes);
+        let loaded = finish_video(c, end, true, false, "").unwrap();
+        assert_eq!(loaded.frames.len(), 6);
+        assert!(loaded.frames.iter().all(|f| (f.width, f.height) == (2, 1) && f.delay_ms == 100));
+        assert!(loaded.frames.iter().all(|f| f.rgba() == vec![255; 8]));
+        assert!(!loaded.memory_limited);
+        assert!(loaded.warning.is_none());
     }
 
     #[test]
