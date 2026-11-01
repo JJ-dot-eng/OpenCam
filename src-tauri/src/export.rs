@@ -74,8 +74,9 @@ pub fn prepare(frames: &[Frame], opt: &ExportOptions, s: &Settings) -> Vec<Frame
         for f in out {
             match merged.last_mut() {
                 Some(last) if acc < min => {
-                    acc += f.delay_ms;
-                    *last = last.with_delay(last.delay_ms + f.delay_ms);
+                    // 한 프레임 시간은 u32(ms)라서 넘치면 가장 긴 값으로 둔다 (합친 프레임이 이미 아주 길 때만)
+                    acc = acc.saturating_add(f.delay_ms);
+                    *last = last.with_delay(last.delay_ms.saturating_add(f.delay_ms));
                 }
                 _ => {
                     acc = f.delay_ms;
@@ -96,8 +97,11 @@ pub fn prepare(frames: &[Frame], opt: &ExportOptions, s: &Settings) -> Vec<Frame
         }
         let mut kept: Vec<Frame> = vec![];
         for (i, f) in out.into_iter().enumerate() {
+            // 시간은 앞 프레임에 넘긴다. 넘기면 한 프레임 시간(u32 ms)을 넘을 때는 이 프레임을 남겨 전체 시간을 지킨다
             match kept.last_mut() {
-                Some(last) if gone[i] => *last = last.with_delay(last.delay_ms + f.delay_ms),
+                Some(last) if gone[i] && last.delay_ms.checked_add(f.delay_ms).is_some() => {
+                    *last = last.with_delay(last.delay_ms + f.delay_ms)
+                }
                 _ => kept.push(f),
             }
         }
@@ -105,14 +109,15 @@ pub fn prepare(frames: &[Frame], opt: &ExportOptions, s: &Settings) -> Vec<Frame
     }
 
     let scale = opt.resize_percent.clamp(1, 400);
-    let total: u32 = out.iter().map(|f| f.delay_ms).sum();
-    let progress = opt.embed_progress && total >= s.embed_progress_min_sec * 1000;
+    // 전체 시간은 u32를 넘을 수 있다 (600초 프레임 7200장이면 43억 ms)
+    let total: u64 = out.iter().map(|f| u64::from(f.delay_ms)).sum();
+    let progress = opt.embed_progress && total >= u64::from(s.embed_progress_min_sec) * 1000;
     if scale != 100 || progress {
-        let starts: Vec<u32> = out
+        let starts: Vec<u64> = out
             .iter()
-            .scan(0u32, |t, f| {
+            .scan(0u64, |t, f| {
                 let st = *t;
-                *t += f.delay_ms;
+                *t += u64::from(f.delay_ms);
                 Some(st)
             })
             .collect();
@@ -129,7 +134,7 @@ pub fn prepare(frames: &[Frame], opt: &ExportOptions, s: &Settings) -> Vec<Frame
                         (w, h) = (nw, nh);
                     }
                     if progress {
-                        let pos = (start + f.delay_ms) as f32 / total.max(1) as f32;
+                        let pos = (start + u64::from(f.delay_ms)) as f32 / total.max(1) as f32;
                         draw_progress(&mut px, w, h, pos, s);
                     }
                     (w, h, px)
@@ -540,6 +545,12 @@ impl std::hash::Hasher for ColorHasher {
     }
 }
 
+/// WebP 인코더는 프레임 시각을 i32(ms)로 받는다. 시각은 u64로 더하고,
+/// 약 24.8일을 넘으면 시간을 바꾸지 않고 오류로 알린다 (예전에는 i32로 더하다 넘쳤다)
+fn webp_stamp(t: u64) -> Result<i32> {
+    i32::try_from(t).map_err(|_| anyhow!("WebP는 전체 길이가 약 24.8일을 넘으면 저장할 수 없습니다"))
+}
+
 fn webp(frames: &[Frame], path: &Path, quality: u8, s: &Settings, progress: Progress) -> Result<()> {
     use webp_animation::{AnimParams, Encoder, EncoderOptions, EncodingConfig, EncodingType};
     let (w, h) = (frames[0].width, frames[0].height);
@@ -560,13 +571,15 @@ fn webp(frames: &[Frame], path: &Path, quality: u8, s: &Settings, progress: Prog
         opts.allow_mixed = false;
     }
     let mut enc = Encoder::new_with_options((w, h), opts).map_err(|e| anyhow!("WebP 인코더 오류: {e:?}"))?;
-    let mut t = 0i32;
+    // 너무 길면 인코딩하기 전에 알린다
+    webp_stamp(frames.iter().map(|f| u64::from(f.delay_ms)).sum())?;
+    let mut t = 0u64;
     for (i, f) in frames.iter().enumerate() {
-        enc.add_frame(&f.rgba(), t).map_err(|e| anyhow!("WebP 프레임 오류: {e:?}"))?;
-        t += f.delay_ms as i32;
+        enc.add_frame(&f.rgba(), webp_stamp(t)?).map_err(|e| anyhow!("WebP 프레임 오류: {e:?}"))?;
+        t += u64::from(f.delay_ms);
         progress((i + 1) as f32 / frames.len() as f32, "WebP 인코딩 중");
     }
-    let data = enc.finalize(t).map_err(|e| anyhow!("WebP 저장 오류: {e:?}"))?;
+    let data = enc.finalize(webp_stamp(t)?).map_err(|e| anyhow!("WebP 저장 오류: {e:?}"))?;
     std::fs::write(path, &*data)?;
     Ok(())
 }
@@ -599,6 +612,35 @@ fn quantize_shared(frames: &[Frame], quality: u8) -> Result<(Vec<u8>, Vec<u8>, V
     Ok((rgb, trns, indices))
 }
 
+/// APNG 프레임 시간은 "분자/분모 초"이고 둘 다 u16이다.
+/// 65.535초까지는 예전처럼 ms/1000으로 써서 저장 결과가 바뀌지 않는다.
+/// 더 길면 분모를 줄여 분자가 u16에 들어가게 하고, 분모를 1부터 차례로 보며 실제 시간에 가장 가까운 값을 고른다.
+/// 120초는 120/1, 65.536초는 8192/125처럼 정확히 담을 수 있으면 그대로 담는다 (600초까지는 10ms 단위 값이면 모두 정확).
+/// 70.001초처럼 정확히 담을 수 없으면 가장 가까운 값(65521/936초, 약 0.07ms 차이)이 되고, 65535초가 넘으면 65535초로 쓴다.
+fn apng_delay(ms: u32) -> (u16, u16) {
+    if let Ok(num) = u16::try_from(ms) {
+        return (num, 1000);
+    }
+    let ms = u64::from(ms);
+    let max = u64::from(u16::MAX);
+    // 분모가 이보다 크면 분자가 u16을 넘는다
+    let max_den = (max * 1000 / ms).max(1);
+    let mut best: Option<(u64, u64, u64)> = None; // (분자, 분모, 오차 × 분모)
+    for den in 1..=max_den {
+        let num = ((ms * den + 500) / 1000).min(max);
+        let err = (num * 1000).abs_diff(ms * den);
+        // 실제 오차는 err / den ms. 나누지 않고 곱해서 비교하고, 같으면 작은 분모를 남긴다
+        if best.is_none_or(|(_, d, e)| err * d < e * den) {
+            best = Some((num, den, err));
+        }
+        if err == 0 {
+            break;
+        }
+    }
+    let (num, den, _) = best.unwrap_or((max, 1, 0));
+    (num as u16, den as u16)
+}
+
 fn apng(frames: &[Frame], path: &Path, s: &Settings, progress: Progress) -> Result<()> {
     let (w, h) = (frames[0].width, frames[0].height);
     let file = BufWriter::new(std::fs::File::create(path)?);
@@ -623,7 +665,8 @@ fn apng(frames: &[Frame], path: &Path, s: &Settings, progress: Progress) -> Resu
     enc.set_animated(frames.len() as u32, plays(s.apng_finite_loop, s.apng_loop_count).map_or(0, u32::from))?;
     let mut writer = enc.write_header()?;
     for (i, f) in frames.iter().enumerate() {
-        writer.set_frame_delay(f.delay_ms.min(u16::MAX as u32) as u16, 1000)?;
+        let (num, den) = apng_delay(f.delay_ms);
+        writer.set_frame_delay(num, den)?;
         match &indexed {
             Some(idx) => writer.write_image_data(&idx[i])?,
             None => writer.write_image_data(&f.rgba())?,
@@ -1489,6 +1532,93 @@ mod tests {
         assert_eq!(r.info().color_type, png::ColorType::Indexed);
         assert_eq!(r.info().animation_control.unwrap().num_frames, 3);
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn apng_delay_fits_long_frames() {
+        // 65.535초까지는 예전과 같은 ms/1000
+        assert_eq!(apng_delay(0), (0, 1000));
+        assert_eq!(apng_delay(10), (10, 1000));
+        assert_eq!(apng_delay(65_535), (65_535, 1000));
+        // 더 길면 정확히 담을 수 있는 분수 (예전에는 모두 65.535초로 잘렸다)
+        assert_eq!(apng_delay(65_536), (8192, 125));
+        assert_eq!(apng_delay(70_004), (17_501, 250));
+        assert_eq!(apng_delay(120_000), (120, 1));
+        assert_eq!(apng_delay(600_000), (600, 1));
+        assert_eq!(apng_delay(600_010), (60_001, 100));
+        // 정확히 담을 수 없으면 가장 가까운 값 (70.001초 → 약 70.00093초)
+        assert_eq!(apng_delay(70_001), (65_521, 936));
+        // 65535초가 넘으면 가장 긴 값
+        assert_eq!(apng_delay(65_535_000), (65_535, 1));
+        assert_eq!(apng_delay(u32::MAX), (65_535, 1));
+        // 화면에서 고를 수 있는 600초까지, 10ms 단위 값은 모두 정확하다
+        for ms in (10..=600_000u32).step_by(10) {
+            let (num, den) = apng_delay(ms);
+            assert_eq!(u64::from(num) * 1000, u64::from(ms) * u64::from(den), "{ms}ms");
+        }
+    }
+
+    /// 저장한 APNG의 프레임마다 (분자, 분모) 시간을 fcTL 조각에서 바로 읽는다
+    fn apng_frame_delays(path: &Path) -> Vec<(u16, u16)> {
+        let bytes = std::fs::read(path).unwrap();
+        let mut out = vec![];
+        let mut i = 8; // PNG 서명 다음부터 조각(길이 4, 이름 4, 내용, CRC 4)이 이어진다
+        while i + 8 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            if &bytes[i + 4..i + 8] == b"fcTL" {
+                // 내용: 번호·가로·세로·x·y(각 4바이트) 다음에 분자·분모(각 2바이트)
+                let d = &bytes[i + 8..i + 8 + len];
+                out.push((u16::from_be_bytes([d[20], d[21]]), u16::from_be_bytes([d[22], d[23]])));
+            }
+            i += 12 + len;
+        }
+        out
+    }
+
+    #[test]
+    fn apng_file_keeps_long_frame_delays() {
+        let s = Settings::default();
+        let delays = [10, 65_535, 120_000, 600_000, 70_001];
+        let input: Vec<Frame> =
+            delays.iter().enumerate().map(|(i, &d)| Frame::from_rgba(1, 1, &[(i * 50) as u8, 0, 0, 255], d)).collect();
+        let p = std::env::temp_dir().join(format!("opencam_apng_long_{}.png", std::process::id()));
+        export(&input, &p, &opts(Format::Apng), &s, &|_, _| {}).unwrap();
+        assert_eq!(apng_frame_delays(&p), vec![(10, 1000), (65_535, 1000), (120, 1), (600, 1), (65_521, 936)]);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn prepare_long_total_time_does_not_overflow() {
+        // 600초 프레임 7200장 = 43억 2천만 ms (u32를 넘는다). 예전에는 디버그에서 멈췄다
+        let mut s = Settings::default();
+        s.embed_progress_min_sec = 1;
+        let base = Frame::from_rgba(1, 1, &[0, 0, 0, 255], 600_000);
+        let input: Vec<Frame> = (0..7200).map(|_| base.duplicate()).collect();
+        // 진행 막대: 첫 장은 거의 비어 있고(배경색) 마지막 장은 꽉 찬다(막대 색)
+        let mut o = opts(Format::Gif);
+        o.embed_progress = true;
+        let out = prepare(&input, &o, &s);
+        assert_eq!(out.len(), 7200);
+        assert_eq!(&out[0].rgba()[..3], &bgr(s.embed_progress_bg_color));
+        assert_eq!(&out[7199].rgba()[..3], &bgr(s.embed_progress_color));
+        // 비슷한 이미지 건너뛰기: 한 프레임 시간(u32)에 다 담을 수 없으면 두 장으로 나눠 전체 시간을 지킨다
+        let mut o = opts(Format::Gif);
+        o.skip_similar = Some(0);
+        let out = prepare(&input, &o, &s);
+        let delays: Vec<u32> = out.iter().map(|f| f.delay_ms).collect();
+        assert_eq!(delays, vec![7158 * 600_000, 42 * 600_000]);
+        assert_eq!(delays.iter().map(|&d| u64::from(d)).sum::<u64>(), 7200 * 600_000);
+    }
+
+    #[test]
+    fn webp_rejects_total_time_beyond_i32() {
+        // 15억 ms 두 장 = 30억 ms. WebP 인코더는 시각을 i32로 받아서 담을 수 없다 (예전에는 더하다 넘쳤다)
+        let s = Settings::default();
+        let input: Vec<Frame> = (0..2).map(|i| Frame::from_rgba(1, 1, &[i * 200, 0, 0, 255], 1_500_000_000)).collect();
+        let p = std::env::temp_dir().join(format!("opencam_webp_long_{}.webp", std::process::id()));
+        let err = export(&input, &p, &opts(Format::Webp), &s, &|_, _| {}).unwrap_err();
+        assert!(err.to_string().contains("24.8일"), "{err}");
+        assert!(!p.exists());
     }
 
     #[test]

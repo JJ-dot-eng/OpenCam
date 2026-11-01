@@ -148,14 +148,15 @@ fn paste(dst: &mut [u8], dw: u32, src: &[u8], x: u32, y: u32, cw: u32, ch: u32) 
     }
 }
 
-/// 한 영상의 프레임 시작 시각들과 전체 길이
-fn starts(frames: &[Frame]) -> (Vec<u32>, u32) {
-    let mut t = 0;
+/// 한 영상의 프레임 시작 시각들과 전체 길이.
+/// 시각은 u64로 센다 (600초 프레임 7200장이면 u32를 넘는다)
+fn starts(frames: &[Frame]) -> (Vec<u64>, u64) {
+    let mut t = 0u64;
     let s = frames
         .iter()
         .map(|f| {
             let st = t;
-            t += f.delay_ms;
+            t += u64::from(f.delay_ms);
             st
         })
         .collect();
@@ -163,7 +164,7 @@ fn starts(frames: &[Frame]) -> (Vec<u32>, u32) {
 }
 
 /// 영상 안의 시각 local에 보이는 프레임 번호
-fn index_at(st: &[u32], local: u32) -> usize {
+fn index_at(st: &[u64], local: u64) -> usize {
     st.partition_point(|&s| s <= local).saturating_sub(1)
 }
 
@@ -196,11 +197,11 @@ pub fn make(clips: &[Vec<Frame>], o: &CollageOptions, bg_image: Option<(u32, u32
         })
         .collect();
 
-    let info: Vec<(Vec<u32>, u32)> = clips[..used].iter().map(|c| starts(c)).collect();
+    let info: Vec<(Vec<u64>, u64)> = clips[..used].iter().map(|c| starts(c)).collect();
     let longest = info.iter().map(|(_, d)| *d).max().unwrap_or(1);
-    let offsets: Vec<u32> = info
+    let offsets: Vec<u64> = info
         .iter()
-        .scan(0u32, |acc, (_, d)| {
+        .scan(0u64, |acc, (_, d)| {
             let o = *acc;
             *acc += d;
             Some(o)
@@ -209,11 +210,11 @@ pub fn make(clips: &[Vec<Frame>], o: &CollageOptions, bg_image: Option<(u32, u32
     let total = if o.play == PlayMode::Sequence { info.iter().map(|(_, d)| d).sum() } else { longest };
 
     // 어느 영상이든 장면이 바뀌는 시각을 모아 출력 프레임의 경계로 쓴다
-    let mut cuts = vec![0u32];
+    let mut cuts = vec![0u64];
     for (i, (st, d)) in info.iter().enumerate() {
         match o.play {
             PlayMode::Hold => cuts.extend(st.iter().copied()),
-            PlayMode::Sync => cuts.extend(st.iter().map(|&s| (s as u64 * longest as u64 / *d as u64) as u32)),
+            PlayMode::Sync => cuts.extend(st.iter().map(|&s| scale_time(s, longest, *d))),
             PlayMode::Repeat => {
                 let mut k = 0;
                 while k * d < total {
@@ -226,19 +227,19 @@ pub fn make(clips: &[Vec<Frame>], o: &CollageOptions, bg_image: Option<(u32, u32
     }
     cuts.sort_unstable();
     // GIF는 10ms 단위라 너무 가까운 경계는 합친다
-    let mut merged: Vec<u32> = vec![];
+    let mut merged: Vec<u64> = vec![];
     for t in cuts {
         if t < total && merged.last().is_none_or(|&l| t >= l + 10) {
             merged.push(t);
         }
     }
 
-    let frame_at = |i: usize, t: u32| -> usize {
+    let frame_at = |i: usize, t: u64| -> usize {
         let (st, d) = &info[i];
         let local = match o.play {
             PlayMode::Hold => t.min(d - 1),
             PlayMode::Repeat => t % d,
-            PlayMode::Sync => (t as u64 * *d as u64 / longest as u64) as u32,
+            PlayMode::Sync => scale_time(t, *d, longest),
             PlayMode::Sequence => t.saturating_sub(offsets[i]).min(d - 1),
         };
         index_at(st, local)
@@ -254,10 +255,18 @@ pub fn make(clips: &[Vec<Frame>], o: &CollageOptions, bg_image: Option<(u32, u32
                 let (x, y, cw, ch) = cells[i];
                 paste(&mut px, o.width, &fitted[i][frame_at(i, t)], x, y, cw, ch);
             }
-            Frame::from_rgba(o.width, o.height, &px, (end - t).max(10))
+            // 한 장의 시간은 들어온 프레임보다 거의 길어지지 않지만, 프레임 시간(u32 ms)을 넘지 않게 막아 둔다
+            let delay = u32::try_from((end - t).max(10)).unwrap_or(u32::MAX);
+            Frame::from_rgba(o.width, o.height, &px, delay)
         })
         .collect();
     Ok(out)
+}
+
+/// 재생 시간 동기화에서 시각을 늘이거나 줄인다: t × num / den.
+/// 두 값이 다 크면 곱이 u64를 넘을 수 있어 u128로 계산한다 (t가 den보다 작아서 결과는 num보다 작다)
+fn scale_time(t: u64, num: u64, den: u64) -> u64 {
+    (u128::from(t) * u128::from(num) / u128::from(den)) as u64
 }
 
 #[cfg(test)]
@@ -345,5 +354,23 @@ mod tests {
         assert_eq!(&px[i..i + 2], &[200, 1]);
         // 칸 사이(선)는 배경색
         assert_eq!(&px[4 * 4..4 * 4 + 3], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn long_clips_total_time_beyond_u32() {
+        // 30억 ms 프레임(600초 프레임 5000장을 합친 길이). 예전에는 시각 합이 u32를 넘어 디버그에서 멈췄다
+        let long = 3_000_000_000;
+        let a = clip(2, long, 10); // 60억 ms
+        let b = clip(1, long, 200); // 30억 ms
+        let out = |m| make(&[a.clone(), b.clone()], &opts(m), None).unwrap();
+        let delays = |m| out(m).iter().map(|f| f.delay_ms).collect::<Vec<_>>();
+        assert_eq!(delays(PlayMode::Hold), vec![long; 2]);
+        assert_eq!(delays(PlayMode::Repeat), vec![long; 2]);
+        assert_eq!(delays(PlayMode::Sync), vec![long; 2]);
+        assert_eq!(delays(PlayMode::Sequence), vec![long; 3]);
+        // 차례로 재생: 왼쪽 칸은 두 번째 장면(초록 1)부터 끝까지 그 장면에 멈춰 있다
+        let seq = out(PlayMode::Sequence);
+        assert_eq!(&seq[1].rgba()[..2], &[10, 1]);
+        assert_eq!(&seq[2].rgba()[..2], &[10, 1]);
     }
 }

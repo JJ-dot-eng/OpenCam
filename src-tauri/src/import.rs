@@ -107,14 +107,22 @@ fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Ve
         ))
     };
     let mut any = false;
-    let mut frames_of = |frames: image::Frames| -> Result<()> {
+    let mut frames_of = |frames: image::Frames, is_gif: bool| -> Result<()> {
         for f in frames {
             let f = f?;
             let (n, d) = f.delay().numer_denom_ms();
             let ms = if d == 0 { 100 } else { n / d };
+            // 짧은 시간을 100ms로 바꾸는 보정은 GIF에만 한다. APNG·WebP는 적힌 시간을 그대로 쓴다(0일 때만 100ms)
+            let ms = if is_gif {
+                gif_delay(ms)
+            } else if ms == 0 {
+                100
+            } else {
+                ms
+            };
             let buf = f.into_buffer();
             any = true;
-            if !on_frame(buf.width(), buf.height(), buf.into_raw(), gif_delay(ms)) {
+            if !on_frame(buf.width(), buf.height(), buf.into_raw(), ms) {
                 break;
             }
         }
@@ -126,14 +134,14 @@ fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Ve
         "gif" => {
             let mut d = image::codecs::gif::GifDecoder::new(open()?)?;
             limit_decoder(&mut d, path)?;
-            frames_of(d.into_frames())?;
+            frames_of(d.into_frames(), true)?;
             None
         }
         "webp" => {
             let mut d = image::codecs::webp::WebPDecoder::new(open()?)?;
             limit_decoder(&mut d, path)?;
             if d.has_animation() {
-                frames_of(d.into_frames())?;
+                frames_of(d.into_frames(), false)?;
                 None
             } else {
                 Some(still(image::DynamicImage::from_decoder(d)?.to_rgba8()))
@@ -147,7 +155,7 @@ fn decode_file(path: &Path, still_ms: u32, on_frame: &mut dyn FnMut(u32, u32, Ve
             let mut d = image::codecs::png::PngDecoder::with_limits(open()?, image_limits())?;
             limit_decoder(&mut d, path)?;
             if d.is_apng()? {
-                frames_of(d.apng()?.into_frames())?;
+                frames_of(d.apng()?.into_frames(), false)?;
                 None
             } else {
                 Some(still(image::DynamicImage::from_decoder(d)?.to_rgba8()))
@@ -963,6 +971,57 @@ mod tests {
         assert!(loaded.memory_limited);
         // 한도가 넉넉하면 깨진 프레임까지 읽으므로 오류
         assert!(load_files(&p, 100, Fit::Contain, usize::MAX, &|_, _| {}).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn short_delays_are_corrected_only_for_gif() {
+        // 10ms 프레임 3장. 예전에는 APNG·WebP도 GIF처럼 100ms로 바뀌었다
+        let dir = std::env::temp_dir().join(format!("opencam_import_short_delay_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let colors = [[250u8, 0, 0, 255], [0, 250, 0, 255], [0, 0, 250, 255]];
+
+        let apng = dir.join("short.png");
+        {
+            let file = std::io::BufWriter::new(std::fs::File::create(&apng).unwrap());
+            let mut enc = png::Encoder::new(file, 2, 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.set_animated(3, 0).unwrap();
+            let mut w = enc.write_header().unwrap();
+            for c in &colors {
+                w.set_frame_delay(1, 100).unwrap(); // 1/100초 = 10ms
+                w.write_image_data(&c.repeat(4)).unwrap();
+            }
+            w.finish().unwrap();
+        }
+
+        let webp = dir.join("short.webp");
+        {
+            let mut enc = webp_animation::Encoder::new((2, 2)).unwrap();
+            for (k, c) in colors.iter().enumerate() {
+                enc.add_frame(&c.repeat(4), k as i32 * 10).unwrap();
+            }
+            std::fs::write(&webp, &*enc.finalize(30).unwrap()).unwrap();
+        }
+
+        let gif_path = dir.join("short.gif");
+        {
+            let palette = [250, 0, 0, 0, 250, 0, 0, 0, 250, 0, 0, 0];
+            let mut enc = gif::Encoder::new(std::fs::File::create(&gif_path).unwrap(), 2, 2, &palette).unwrap();
+            for k in 0..3u8 {
+                let mut fr = gif::Frame { width: 2, height: 2, delay: 1, ..Default::default() }; // 1/100초
+                fr.buffer = std::borrow::Cow::Owned(vec![k; 4]);
+                enc.write_frame(&fr).unwrap();
+            }
+        }
+
+        for (path, expected) in [(&apng, 10), (&webp, 10), (&gif_path, 100)] {
+            let p = [path.to_string_lossy().into_owned()];
+            let loaded = load_files(&p, 100, Fit::Contain, usize::MAX, &|_, _| {}).unwrap();
+            let delays: Vec<u32> = loaded.frames.iter().map(|f| f.delay_ms).collect();
+            assert_eq!(delays, vec![expected; 3], "{}", path.display());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
