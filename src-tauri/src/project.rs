@@ -240,8 +240,10 @@ impl Project {
             return;
         }
         self.checkpoint();
-        let total: u32 = s.iter().map(|&i| self.frames[i].delay_ms).sum();
-        self.frames[s[0]] = self.frames[s[0]].with_delay(total);
+        // 합은 u64로 센다 (600초 프레임 7200장이면 u32를 넘는다).
+        // 한 프레임 시간은 u32(ms)라서 그보다 길면(약 49.7일) 가장 긴 값으로 둔다
+        let total: u64 = s.iter().map(|&i| u64::from(self.frames[i].delay_ms)).sum();
+        self.frames[s[0]] = self.frames[s[0]].with_delay(u32::try_from(total).unwrap_or(u32::MAX));
         for &i in s[1..].iter().rev() {
             self.frames.remove(i);
         }
@@ -772,19 +774,20 @@ pub fn find_similar(
     };
     let mut anchor = frames[first].rgba();
     let mut anchor_size = (frames[first].width, frames[first].height);
-    let mut merged = frames[first].delay_ms;
+    // 합친 시간은 u32를 넘을 수 있어 u64로 센다
+    let mut merged = u64::from(frames[first].delay_ms);
     for &i in &sel[1..] {
         let f = &frames[i];
         let px = f.rgba();
         let similar = (f.width, f.height) == anchor_size && is_similar(&anchor, &px, f.width, f.height, ratio, t);
-        let within_time = time_limit_ms.is_none_or(|lim| merged + f.delay_ms <= lim);
+        let within_time = time_limit_ms.is_none_or(|lim| merged + u64::from(f.delay_ms) <= u64::from(lim));
         if similar && within_time {
             drop.push(i);
-            merged += f.delay_ms;
+            merged += u64::from(f.delay_ms);
         } else {
             anchor = px;
             anchor_size = (f.width, f.height);
-            merged = f.delay_ms;
+            merged = u64::from(f.delay_ms);
         }
     }
     drop
@@ -893,6 +896,37 @@ mod tests {
         assert_eq!(p.frames.len(), 2);
         assert_eq!(p.frames[0].delay_ms, 200);
         assert_eq!(p.frames[1].delay_ms, 200);
+    }
+
+    #[test]
+    fn merge_long_frames_does_not_overflow() {
+        let mut p = Project::default();
+        // 600초 프레임 3장은 그대로 더한다
+        let base = solid(1, 1, 0, 600_000);
+        p.load((0..3).map(|_| base.duplicate()).collect());
+        p.merge(&[0, 1, 2]);
+        assert_eq!(p.frames.len(), 1);
+        assert_eq!(p.frames[0].delay_ms, 1_800_000);
+        // 600초 프레임 7200장 = 43억 2천만 ms. u32를 넘으니 한 프레임에 담을 수 있는 가장 긴 값이 된다
+        // (예전에는 u32로 더하다 디버그에서 멈췄다)
+        p.load((0..7200).map(|_| base.duplicate()).collect());
+        let all: Vec<usize> = (0..7200).collect();
+        p.merge(&all);
+        assert_eq!(p.frames.len(), 1);
+        assert_eq!(p.frames[0].delay_ms, u32::MAX);
+    }
+
+    #[test]
+    fn similar_frames_with_long_total_time() {
+        // 같은 그림 600초 7200장. 합친 시간이 u32를 넘어도 비슷한 프레임 찾기가 멈추지 않는다
+        let base = solid(1, 1, 5, 600_000);
+        let frames: Vec<Frame> = (0..7200).map(|_| base.duplicate()).collect();
+        let sel: Vec<usize> = (0..7200).collect();
+        assert_eq!(find_similar(&frames, &sel, 0, 0, None).len(), 7199);
+        // 시간 제한이 있으면 그 안에서만 합친다 (u32 최대값 제한이면 7158장씩)
+        let drop = find_similar(&frames, &sel, 0, 0, Some(u32::MAX));
+        assert_eq!(drop.len(), 7200 - 2);
+        assert!(!drop.contains(&7158));
     }
 
     #[test]
