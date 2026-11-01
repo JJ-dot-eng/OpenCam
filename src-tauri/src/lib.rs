@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -978,9 +979,18 @@ fn recycle(path: &str) -> CmdResult<()> {
     if r == 0 { Ok(()) } else { Err(format!("휴지통으로 옮기지 못했습니다 (코드 {r})")) }
 }
 
-/// 편집 창 이미지 요청을 돌린다 (지금은 전역 Rayon 풀)
+/// 프로젝트 잠금을 기다리는 이미지 요청이 편집에 필요한 Rayon 스레드를 막지 않게 따로 돌린다.
 fn spawn_frame_job(job: impl FnOnce() + Send + 'static) {
-    rayon::spawn(job);
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("frame-{i}"))
+            .build()
+            .expect("프레임 이미지용 스레드를 만들지 못했습니다")
+    })
+    .spawn(job);
 }
 
 /// 편집 창 미리보기용 프레임 이미지: frame://localhost/<id> (원본), /<id>/t (썸네일)
