@@ -738,6 +738,26 @@ mod tests {
     }
 
     #[test]
+    fn raw_video_progress_reaches_full_after_eof() {
+        // 다 읽으면 마지막 진행률은 1.0이어야 한다. 예전에는 0.99에서 멈춘 채로 다음 처리를 기다렸다.
+        // (장수, 예상 장수): 딱 맞음, 예상보다 많음, 예상보다 적음(오디오가 더 긴 동영상)
+        for (frames, expected) in [(3usize, 3.0f32), (5, 2.0), (2, 100.0)] {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let mut c = Collector::new(usize::MAX);
+            let end = collect_raw_frames(
+                std::io::Cursor::new(vec![255u8; 4 * frames]), 1, 1, 4, None, 10.0, expected, &mut c,
+                &|p, _| seen.lock().unwrap().push(p),
+            );
+            assert_eq!(end, VideoReadEnd::Eof);
+            assert_eq!(c.frames.len(), frames);
+            let seen = seen.into_inner().unwrap();
+            assert_eq!(seen.last().copied(), Some(1.0), "{frames}장, 예상 {expected}장: {seen:?}");
+            // 100%는 다 읽은 뒤 한 번만 보낸다
+            assert!(seen[..seen.len() - 1].iter().all(|&p| (0.0..1.0).contains(&p)), "{seen:?}");
+        }
+    }
+
+    #[test]
     fn raw_video_partial_frame_warns() {
         let (c, end) = collect_test_video(vec![255; 11], usize::MAX);
         assert_eq!(end, VideoReadEnd::PartialFrame);
