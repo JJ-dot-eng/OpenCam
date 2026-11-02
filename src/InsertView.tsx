@@ -20,6 +20,7 @@ import {
   IconTypography,
 } from "@tabler/icons-react";
 import { Anim, api, errText, FrameInfo, frameUrl, OverlayMeta } from "./api";
+import { type BlobImageLoader, createBlobImageLoader } from "./blobImage";
 import { Check, isModalOpen } from "./dialogs";
 import SidePanel from "./SidePanel";
 import {
@@ -385,21 +386,37 @@ export default function InsertView({ frame, scale, onApply, onCancel, onError }:
     });
   };
 
-  const loadImage = (src: string) => {
-    const img = new Image();
-    img.onload = () => {
-      const fit = Math.max(5, Math.min(100, Math.floor(Math.min(W / img.naturalWidth, H / img.naturalHeight) * 100)));
-      add(newItem("image", { image: img, scale: fit }));
+  // 파일·클립보드 그림을 읽는 곳. 읽기가 끝나면 Blob URL을 해제하고, 화면이 닫힌 뒤 온 결과는 버린다
+  const images = useRef<BlobImageLoader<HTMLImageElement> | null>(null);
+  useEffect(() => {
+    const loader = createBlobImageLoader({
+      createUrl: (b) => URL.createObjectURL(b),
+      revokeUrl: (u) => URL.revokeObjectURL(u),
+      makeImage: () => new Image(),
+    });
+    images.current = loader;
+    return () => {
+      loader.dispose();
+      if (images.current === loader) images.current = null;
     };
-    img.onerror = () => onError("이미지를 열 수 없습니다");
-    img.src = src;
+  }, []);
+  const loadImage = (blob: Blob) => {
+    images.current?.load(
+      blob,
+      (img) => {
+        const fit = Math.max(5, Math.min(100, Math.floor(Math.min(W / img.naturalWidth, H / img.naturalHeight) * 100)));
+        add(newItem("image", { image: img, scale: fit }));
+      },
+      () => onError("이미지를 열 수 없습니다"),
+    );
   };
   const pasteImage = async () => {
     try {
       const buf = await api.clipboardImagePng();
-      loadImage(URL.createObjectURL(new Blob([buf], { type: "image/png" })));
+      loadImage(new Blob([buf], { type: "image/png" }));
     } catch (e) {
-      onError(errText(e));
+      // 클립보드를 읽는 동안 화면이 닫혔으면 알리지 않는다
+      if (images.current) onError(errText(e));
     }
   };
 
@@ -544,7 +561,7 @@ export default function InsertView({ frame, scale, onApply, onCancel, onError }:
             accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
             onChange={(e) => {
               const file = e.target.files?.[0];
-              if (file) loadImage(URL.createObjectURL(file));
+              if (file) loadImage(file);
               e.target.value = "";
             }}
           />
