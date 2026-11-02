@@ -406,7 +406,15 @@ fn collect_raw_frames(
         let mut filled = 0;
         while filled < frame_len {
             match reader.read(&mut buf[filled..]) {
-                Ok(0) => return if filled == 0 { VideoReadEnd::Eof } else { VideoReadEnd::PartialFrame },
+                Ok(0) => {
+                    if filled != 0 {
+                        return VideoReadEnd::PartialFrame;
+                    }
+                    if k > 0 {
+                        progress(1.0, "동영상 불러오는 중");
+                    }
+                    return VideoReadEnd::Eof;
+                }
                 Ok(n) => filled += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return VideoReadEnd::ReadError(e.to_string()),
@@ -517,10 +525,12 @@ fn load_video_inner(
     let fps = fps.clamp(1.0, 60.0);
     let (w, h) = (w.max(1), h.max(1));
     let frame_len = import_rgba_len(w, h).ok_or_else(|| anyhow!("동영상 크기가 너무 커서 불러올 수 없습니다 ({w}×{h})"))?;
+    let expected = ((end_ms - start_ms) as f32 / 1000.0 * fps).ceil().max(1.0);
+    // fps 바로 뒤에서 잘라 오래 머무는 프레임의 복제본이 구간 밖까지 쌓이지 않게 한다.
     let mut child = ffmpeg_command()?
         .args(["-v", "error", "-ss", &format!("{:.3}", start_ms as f64 / 1000.0)])
         .args(["-t", &format!("{:.3}", (end_ms - start_ms) as f64 / 1000.0), "-i", path])
-        .args(["-vf", &format!("fps={fps},scale={w}:{h}:flags=bicubic"), "-an"])
+        .args(["-vf", &format!("fps={fps},trim=end_frame={expected:.0},scale={w}:{h}:flags=bicubic"), "-an"])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -537,7 +547,6 @@ fn load_video_inner(
         }
     };
     let mut out = child.stdout.take().unwrap();
-    let expected = ((end_ms - start_ms) as f32 / 1000.0 * fps).ceil().max(1.0);
     let mut c = Collector::new(max_bytes);
     let read_end = collect_raw_frames(&mut out, w, h, frame_len, pad_to, fps, expected, &mut c, progress);
     let killed_for_limit = matches!(&read_end, VideoReadEnd::MemoryLimit);
@@ -735,6 +744,56 @@ mod tests {
         assert_eq!(loaded.frames.len(), 2);
         assert!(loaded.frames.iter().all(|f| f.delay_ms == 100));
         assert!(loaded.warning.is_none());
+    }
+
+    #[test]
+    fn raw_video_progress_reaches_full_after_eof() {
+        // 다 읽으면 마지막 진행률은 1.0이어야 한다. 예전에는 0.99에서 멈춘 채로 다음 처리를 기다렸다.
+        // (장수, 예상 장수): 딱 맞음, 예상보다 많음, 예상보다 적음(오디오가 더 긴 동영상)
+        for (frames, expected) in [(3usize, 3.0f32), (5, 2.0), (2, 100.0)] {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let mut c = Collector::new(usize::MAX);
+            let end = collect_raw_frames(
+                std::io::Cursor::new(vec![255u8; 4 * frames]), 1, 1, 4, None, 10.0, expected, &mut c,
+                &|p, _| seen.lock().unwrap().push(p),
+            );
+            assert_eq!(end, VideoReadEnd::Eof);
+            assert_eq!(c.frames.len(), frames);
+            let seen = seen.into_inner().unwrap();
+            assert_eq!(seen.last().copied(), Some(1.0), "{frames}장, 예상 {expected}장: {seen:?}");
+            // 100%는 다 읽은 뒤 한 번만 보낸다
+            assert!(seen[..seen.len() - 1].iter().all(|&p| (0.0..1.0).contains(&p)), "{seen:?}");
+        }
+    }
+
+    #[test]
+    fn raw_video_incomplete_read_never_reports_full() {
+        fn check(reader: impl Read, max_bytes: usize, expected_end: VideoReadEnd) {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let mut c = Collector::new(max_bytes);
+            let end = collect_raw_frames(reader, 1, 1, 4, None, 10.0, 2.0, &mut c, &|p, _| {
+                seen.lock().unwrap().push(p);
+            });
+            assert_eq!(end, expected_end);
+            let seen = seen.into_inner().unwrap();
+            assert!(!seen.is_empty());
+            assert!(seen.iter().all(|&p| (0.0..1.0).contains(&p)), "{seen:?}");
+        }
+
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "읽기 실패"))
+            }
+        }
+
+        check(std::io::Cursor::new(vec![255u8; 11]), usize::MAX, VideoReadEnd::PartialFrame);
+        check(std::io::Cursor::new(vec![255u8; 8]), 1, VideoReadEnd::MemoryLimit);
+        check(
+            std::io::Cursor::new(vec![255u8; 8]).chain(FailingReader),
+            usize::MAX,
+            VideoReadEnd::ReadError("읽기 실패".into()),
+        );
     }
 
     #[test]

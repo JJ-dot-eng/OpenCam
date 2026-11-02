@@ -197,6 +197,20 @@ fn video_fixture(dir: &TempDir, ffmpeg: &Path, kind: VideoFixture) -> PathBuf {
     path
 }
 
+/// 0~1초는 10fps, 1초 장면이 6초까지 그대로 머물고, 6~6.9초는 다시 10fps인 가변 FPS 영상.
+/// 화면이 멈춘 동안 프레임을 보내지 않는 녹화(브라우저 녹화 등)와 같은 모양이다.
+fn held_frame_video(dir: &TempDir, ffmpeg: &Path) -> PathBuf {
+    let path = dir.path("held-frame.mkv");
+    let name = path_text(&path);
+    // ffv1은 ffmpeg에 늘 들어 있는 무손실 코덱이라 빌드마다 결과가 같다.
+    ffmpeg_ok(ffmpeg, &[
+        "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=32x24:rate=10:duration=2",
+        "-vf", r"setpts='if(lte(N\,10)\,N/10\,6+(N-11)/10)/TB'", "-fps_mode", "passthrough",
+        "-c:v", "ffv1", "-pix_fmt", "yuv420p", &name,
+    ]);
+    path
+}
+
 fn pixel(px: &[u8], width: u32, x: u32, y: u32) -> &[u8] {
     let i = ((y * width + x) * 4) as usize;
     &px[i..i + 4]
@@ -500,6 +514,28 @@ fn durationless_webm_import_append_export_all_formats() {
 #[test]
 fn corrupt_video_warns_and_appends_next_file_then_exports_all_formats() {
     video_flow(VideoFixture::CorruptAvi);
+}
+
+#[test]
+fn video_range_ending_inside_held_frame_keeps_frame_count() {
+    // 고른 구간(0~2초)의 끝이 1초부터 6초까지 머무는 장면 안에 있다.
+    // 예전에는 그 장면의 원래 길이(6초)까지 복제 프레임이 나와 60장이 되고, 진행률이 99%에 오래 머물렀다.
+    let Some(ffmpeg) = ffmpeg_for_tests() else { return };
+    let dir = TempDir::new();
+    let path = held_frame_video(&dir, &ffmpeg);
+    let name = path_text(&path);
+    let info = import::probe_video(&name).unwrap();
+    assert!((6000..=7500).contains(&info.duration_ms), "테스트 영상 길이: {}ms", info.duration_ms);
+    let seen = std::sync::Mutex::new(Vec::new());
+    let loaded = import::load_video(&name, 0, 2000, FPS, 32, 24, MAX_BYTES, &|p, _| seen.lock().unwrap().push(p))
+        .unwrap();
+    let count = loaded.frames.len();
+    let total: u32 = loaded.frames.iter().map(|f| f.delay_ms).sum();
+    assert!((19..=21).contains(&count), "0~2초를 10fps로 읽으면 20장 안팎이어야 합니다: {count}장 ({total}ms)");
+    assert!((1900..=2100).contains(&total), "불러온 길이가 고른 구간(2초)과 달라졌습니다: {total}ms");
+    // 화면에 "99%"로 보이는 값(0.985 이상 1.0 미만)은 끝에서 한두 번만 나와야 한다
+    let stuck = seen.into_inner().unwrap().iter().filter(|&&p| (0.985..1.0).contains(&p)).count();
+    assert!(stuck <= 2, "진행률이 99%에 {stuck}번 머물렀습니다 ({count}장 중)");
 }
 
 #[test]
