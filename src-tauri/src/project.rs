@@ -393,17 +393,25 @@ impl Project {
             gone[i] = true;
         }
         let mut out: Vec<Frame> = Vec::with_capacity(self.frames.len() - drop.len());
-        let mut carry = 0u32; // 앞에 남길 프레임이 없을 때 첫 프레임에 넘길 시간
+        let mut carry = 0u64; // 앞에 남길 프레임이 없을 때 첫 프레임에 넘길 시간
         for (i, f) in self.frames.iter().enumerate() {
             if gone[i] {
                 if keep_speed {
                     match out.last_mut() {
-                        Some(prev) => *prev = prev.with_delay(prev.delay_ms + f.delay_ms),
-                        None => carry += f.delay_ms,
+                        Some(prev) => {
+                            let total = u64::from(prev.delay_ms) + u64::from(f.delay_ms);
+                            *prev = prev.with_delay(u32::try_from(total).unwrap_or(u32::MAX));
+                        }
+                        None => carry += u64::from(f.delay_ms),
                     }
                 }
             } else {
-                out.push(if carry > 0 { f.with_delay(f.delay_ms + std::mem::take(&mut carry)) } else { f.clone() });
+                out.push(if carry > 0 {
+                    let total = u64::from(f.delay_ms) + std::mem::take(&mut carry);
+                    f.with_delay(u32::try_from(total).unwrap_or(u32::MAX))
+                } else {
+                    f.clone()
+                });
             }
         }
         self.frames = out;
@@ -512,13 +520,13 @@ impl Project {
     /// 줌 애니메이션: start 프레임부터 효과 시간만큼의 프레임에 넣는다
     pub fn zoom_fx(&mut self, start: usize, z: &ZoomFx) {
         let mut idx = vec![];
-        let mut t = 0u32;
+        let mut t = 0u64;
         for i in start..self.frames.len() {
-            if t >= z.total_ms {
+            if t >= u64::from(z.total_ms) {
                 break;
             }
             idx.push(i);
-            t += self.frames[i].delay_ms;
+            t += u64::from(self.frames[i].delay_ms);
         }
         let limit = z.total_ms as f32;
         self.map_timed(&idx, |px, w, h, tm, total| {
@@ -571,8 +579,10 @@ impl Project {
             .map(|(k, &i)| {
                 // 지운 프레임들의 시간은 앞에 남은 프레임이 이어받는다
                 let next = keep.get(k + 1).copied().unwrap_or(n);
-                let acc: u32 = self.frames[i..next].iter().map(|f| f.delay_ms).sum();
-                let mut d = o.time_percent.map_or(acc, |p| (acc as u64 * p.clamp(1, 100) as u64 / 100) as u32);
+                // 비율까지 u64로 계산한 뒤 한 프레임 시간(u32 ms)에 맞춘다
+                let acc: u64 = self.frames[i..next].iter().map(|f| u64::from(f.delay_ms)).sum();
+                let scaled = o.time_percent.map_or(acc, |p| acc * u64::from(p.clamp(1, 100)) / 100);
+                let mut d = u32::try_from(scaled).unwrap_or(u32::MAX);
                 if let Some(lim) = o.limit_ms {
                     d = d.min(lim);
                 }
@@ -899,6 +909,24 @@ mod tests {
     }
 
     #[test]
+    fn drop_long_frames_keeps_speed_without_overflow() {
+        let mut p = Project::default();
+        let base = solid(1, 1, 0, 3_000_000_000);
+        // 앞 프레임에 더하기, 첫 프레임 전에 모으기, 모은 시간을 넘기기를 각각 확인한다
+        // 예전에는 세 경우 모두 u32 덧셈이 넘쳐 디버그에서 멈췄다
+        for (drop, expected) in [
+            (vec![1, 2], vec![u32::MAX]),
+            (vec![0, 1], vec![u32::MAX]),
+            (vec![0], vec![u32::MAX, 3_000_000_000]),
+        ] {
+            p.load((0..3).map(|_| base.duplicate()).collect());
+            p.drop_frames(&drop, true);
+            let delays: Vec<u32> = p.frames.iter().map(|f| f.delay_ms).collect();
+            assert_eq!(delays, expected);
+        }
+    }
+
+    #[test]
     fn merge_long_frames_does_not_overflow() {
         let mut p = Project::default();
         // 600초 프레임 3장은 그대로 더한다
@@ -1064,6 +1092,57 @@ mod tests {
         p.summarize(o);
         let delays: Vec<u32> = p.frames.iter().map(|f| f.delay_ms).collect();
         assert_eq!(delays, vec![50, 100, 150]); // 50%로 줄이고 150ms에서 자른다
+    }
+
+    #[test]
+    fn summary_long_frames_does_not_overflow() {
+        let mut p = Project::default();
+        p.load((0..3).map(|_| solid(1, 1, 0, 3_000_000_000)).collect());
+        let o = SummaryOptions { rate: 1, limit_ms: None, time_percent: None };
+        // 90억 ms를 한 장으로 요약한다. 예전에는 시간을 더하다 디버그에서 멈췄다
+        assert_eq!(p.summary_plan(o), vec![(0, u32::MAX)]);
+        // 최대값으로 자르기 전에 비율을 적용해야 22억 5천만 ms가 된다
+        let quarter = SummaryOptions { time_percent: Some(25), ..o };
+        assert_eq!(p.summary_plan(quarter), vec![(0, 2_250_000_000)]);
+        // 50%인 45억 ms도 u32를 넘으므로 가장 긴 값이 된다 (단순 as u32 변환은 값이 잘린다)
+        assert_eq!(p.summary_plan(SummaryOptions { time_percent: Some(50), ..o }), vec![(0, u32::MAX)]);
+        assert_eq!(p.summary_plan(SummaryOptions { limit_ms: Some(300), ..o }), vec![(0, 300)]);
+        assert_eq!(p.summary_plan(SummaryOptions { limit_ms: Some(0), ..o }), vec![(0, 10)]);
+        // 여러 장을 남기면 미리보기 총 시간은 u32보다 길어도 그대로 센다
+        let preview = p.summary_preview(SummaryOptions { rate: 100, ..o });
+        assert_eq!(preview.frames, 3);
+        assert_eq!(preview.total_ms, 9_000_000_000);
+        p.summarize(quarter);
+        assert_eq!(p.frames.len(), 1);
+        assert_eq!(p.frames[0].delay_ms, 2_250_000_000);
+    }
+
+    #[test]
+    fn zoom_long_frames_stops_at_effect_end() {
+        let mut p = Project::default();
+        // 왼쪽 위 한 픽셀은 빨강, 나머지는 파랑인 2×2 그림
+        let px = [255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255];
+        p.load([10, 3_000_000_000, 3_000_000_000, 10].iter().map(|&d| Frame::from_rgba(2, 2, &px, d)).collect());
+        let z = ZoomFx {
+            region: effects::Region { x: 0, y: 0, w: 1, h: 1, ellipse: false },
+            scale: effects::ZoomScale::Full,
+            to_center: true,
+            shadow: false,
+            spread: 0.0,
+            total_ms: u32::MAX,
+            intro_ms: 0,
+            outro_ms: 0,
+        };
+        // 1번부터 60억 ms를 더하면 효과가 끝난다. 예전에는 더하다 넘치거나 3번까지 효과를 넣었다
+        p.zoom_fx(1, &z);
+        for i in [1, 2] {
+            assert!(p.frames[i].rgba().chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+            assert_eq!(p.frames[i].delay_ms, 3_000_000_000);
+        }
+        for i in [0, 3] {
+            assert_eq!(p.frames[i].rgba(), px.to_vec());
+            assert_eq!(p.frames[i].delay_ms, 10);
+        }
     }
 
     #[test]
