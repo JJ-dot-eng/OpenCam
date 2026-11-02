@@ -1705,12 +1705,17 @@ async fn append_files(app: AppHandle, paths: Vec<String>) -> CmdResult<AppendRes
     // 편집 메모리 한도에서 이미 쓰는 만큼을 뺀 만큼만 더 불러온다 (대략)
     let max = memory_limit(&app).saturating_sub(used);
     let progress = import_progress(&app);
-    let (frames, skipped, warning) = tauri::async_runtime::spawn_blocking(move || {
+    let (frames, skipped, warning, memory_limited) = tauri::async_runtime::spawn_blocking(move || {
         let n = paths.len().max(1);
-        collect_append_files(&paths, max, |k, path, left| {
-            let sub = |v: f32, m: &str| progress((k as f32 + v) / n as f32, m);
-            load_for_append(path, size, fps, left, &sub)
-        })
+        let mut memory_limited = false;
+        let (frames, skipped, warning) = collect_append_files(&paths, max, |k, path, left| {
+            // 파일별 EOF가 와도 전체 성공을 확인하기 전에는 100%를 보내지 않는다.
+            let sub = |v: f32, m: &str| progress(((k as f32 + v) / n as f32).min(0.99), m);
+            let loaded = load_for_append(path, size, fps, left, &sub)?;
+            memory_limited |= loaded.memory_limited;
+            Ok(loaded)
+        });
+        (frames, skipped, warning, memory_limited)
     })
     .await
     .map_err(err)?;
@@ -1721,6 +1726,9 @@ async fn append_files(app: AppHandle, paths: Vec<String>) -> CmdResult<AppendRes
     } else {
         Some(p.append(frames).ok_or("편집 중인 프레임의 크기가 바뀌어 붙이지 못했습니다")?)
     };
+    if selection.is_some() && skipped.is_empty() && warning.is_none() && !memory_limited {
+        import_progress(&app)(1.0, "파일 붙이기 완료");
+    }
     Ok(AppendResult { view: view(&p, selection, warning), skipped })
 }
 
