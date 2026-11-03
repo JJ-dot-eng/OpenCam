@@ -95,8 +95,8 @@ export default function Recorder() {
   const barRef = useRef<HTMLDivElement>(null);
   const hover = useRef(false);
   const hideTimer = useRef(0);
-  // 전체 화면·창 맞추기·모니터 절반 등으로 바꿨는지 (되돌리기 단추를 보여 줌). 바꾸기 전 툴바 위아래 설정을 기억해
-  // 맞추기가 툴바를 반대쪽으로 옮겼어도 되돌릴 때 원래대로 한다. 직접 끌거나 크기를 바꾸면 잊는다.
+  // 전체 화면·창 맞추기·모니터 절반 등으로 바꾸기 전의 툴바 위아래 설정. 맞추기가 툴바를 반대쪽으로 옮겼어도
+  // 되돌릴 때 원래대로 한다. 직접 끌거나 크기를 바꾸면 잊는다.
   const [changed, setChanged] = useState<{ bottom: boolean } | null>(null);
   // 배치 계산이 늘 최신 전체 화면 상태를 보게 한다 (끄자마자 이어서 다시 배치할 때 옛 값을 쓰지 않게)
   const fullRef = useRef<Rect | null>(null);
@@ -725,7 +725,8 @@ export default function Recorder() {
             <IconCamera size={18} />
           </button>
         )}
-        {(changed || mode !== "normal") && !recording && (
+        {/* 어느 영역에서든 늘 보인다 (녹화 중에만 숨김) */}
+        {!recording && (
           <button className={`rec-btn restore ${restoreText ? "" : "icon"}`} onClick={resetFrame} title="녹화 틀을 기본 크기로 화면 가운데에 되돌리기">
             <IconArrowBackUp size={16} />
             {restoreText && "되돌리기"}
