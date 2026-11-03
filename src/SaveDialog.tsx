@@ -7,8 +7,8 @@ import { Check, Modal, NumField } from "./dialogs";
 import { chooseAsk, confirmAsk } from "./ask";
 
 const FORMATS: [Format, string][] = [
-  ["gif", "GIF"],
   ["webp", "WebP"],
+  ["gif", "GIF"],
   ["apng", "APNG"],
   ["mp4", "MP4"],
   ["webm", "WebM"],
@@ -39,8 +39,8 @@ interface Props {
 }
 
 export default function SaveDialog({ settings, frames, onClose, onSaved, onDeleted, onNewRecording }: Props) {
-  const [format, setFormat] = useState<Format>("gif");
-  const [quality, setQuality] = useState(settings.gifQuality);
+  const [format, setFormat] = useState<Format>("webp");
+  const [quality, setQuality] = useState(settings.webpQuality);
   const [fitBySize, setFitBySize] = useState(settings.fitBySize);
   const [targetMb, setTargetMb] = useState(settings.fitTargetMb);
   const [allowQuality, setAllowQuality] = useState(settings.fitAllowQuality);
