@@ -82,61 +82,48 @@ pub struct FitInfo {
     pub target_bytes: u64,
 }
 
-/// 100에서 step씩 내려 min까지 (100은 빼고, 마지막은 꼭 min)
-fn steps_down(step: u32, min: u32) -> Vec<u32> {
-    let min = min.clamp(1, 100);
-    let mut out: Vec<u32> = (1..).map(|k| 100u32.saturating_sub(k * step)).take_while(|&v| v > min).collect();
-    if min < 100 {
-        out.push(min);
-    }
-    out
-}
+/// 용량에 맞추기 단계 수. 0단계는 가장 큰 설정, 마지막 단계는 모두 최소값
+const FIT_LEVELS: u32 = 30;
 
-/// 시험해 볼 설정 목록. 맨 앞이 가장 크고 뒤로 갈수록 작아진다: 화질(5씩) → FPS → 이미지 크기(5%씩), 각각 사용자가 정한 하한까지.
-/// 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값에서 시작한다: 화질 100, FPS는 제한·비슷한 장면 건너뛰기 없이
-/// 원래대로, 이미지 크기 100%. 바꾸면 안 되는 항목은 사용자가 정한 값 그대로다. 앞 단계에서 낮춘 값은 그대로 두고 다음 단계를 더한다.
+/// 시험해 볼 설정 목록. 맨 앞이 가장 크고 뒤로 갈수록 작아진다. 바꿔도 되는 항목을 모두 같은 비율로 함께 낮춘다
+/// (한 가지만 끝까지 낮추면 화질만 뭉개지고 크기는 그대로인 결과가 나오기 쉬워서).
+/// 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값에서 시작해 사용자가 정한 최소값까지 간다:
+/// 화질 100 → 최소, 이미지 크기 100% → 최소, FPS는 제한·비슷한 장면 건너뛰기 없이 원래대로 → 최소(같은 배율로 줄도록 비율로).
+/// 바꾸면 안 되는 항목은 사용자가 정한 값 그대로다. 앞 단계와 같은 설정은 빼므로 모든 항목이 뒤로 갈수록 같거나 작다.
 fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<ExportOptions> {
-    let mut current = opt.clone();
-    if fit.allow_quality {
-        current.quality = 100;
-    }
+    let mut base = opt.clone();
     if fit.allow_fps {
-        current.limit_fps = None;
-        current.skip_similar = None;
-        current.skip_similar_time_limit_ms = None;
+        base.limit_fps = None;
+        base.skip_similar = None;
+        base.skip_similar_time_limit_ms = None;
     }
-    if fit.allow_resize {
-        current.resize_percent = 100;
-    }
-    let mut steps = vec![current.clone()];
-    if fit.allow_quality {
-        for q in steps_down(5, u32::from(fit.min_quality)) {
-            current.quality = q as u8;
-            steps.push(current.clone());
-        }
-    }
-    // 지금 FPS: 제한이 있으면 그 값, 없으면 프레임 시간의 가운데 값으로 셈
+    // 원래 FPS: 프레임 시간의 가운데 값으로 셈
     let mut delays: Vec<u32> = frames.iter().map(|f| f.delay_ms.max(1)).collect();
     delays.sort_unstable();
-    let cap = current.limit_fps.filter(|&f| f > 0).unwrap_or_else(|| {
-        delays.get(delays.len() / 2).map_or(0, |d| (1000.0 / *d as f64).round() as u32)
-    });
-    if fit.allow_fps {
-        let min = fit.min_fps.max(1);
-        let mut list: Vec<u32> = [50, 40, 30, 25, 20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1].into_iter().filter(|&f| f > min).collect();
-        list.push(min);
-        for fps in list {
-            if fps < cap {
-                current.limit_fps = Some(fps);
-                steps.push(current.clone());
-            }
+    let cap = delays.get(delays.len() / 2).map_or(0, |d| (1000.0 / *d as f64).round() as u32);
+    let min_q = f64::from(fit.min_quality.clamp(1, 100));
+    let min_r = f64::from(fit.min_resize.clamp(1, 100));
+    let min_fps = f64::from(fit.min_fps.max(1));
+
+    let mut steps: Vec<ExportOptions> = vec![];
+    for k in 0..=FIT_LEVELS {
+        let t = f64::from(k) / f64::from(FIT_LEVELS);
+        let mut step = base.clone();
+        if fit.allow_quality {
+            step.quality = (100.0 - t * (100.0 - min_q)).round() as u8;
         }
-    }
-    if fit.allow_resize {
-        // 바꿔도 되면 시작은 늘 100%라서 단계 값이 곧 이미지 크기(%)
-        for size in steps_down(5, fit.min_resize) {
-            current.resize_percent = size;
-            steps.push(current.clone());
+        if fit.allow_resize {
+            step.resize_percent = (100.0 - t * (100.0 - min_r)).round() as u32;
+        }
+        if fit.allow_fps && (cap as f64) > min_fps {
+            let fps = ((cap as f64) * (min_fps / cap as f64).powf(t)).round().max(min_fps) as u32;
+            step.limit_fps = (fps < cap).then_some(fps);
+        }
+        let same = steps.last().is_some_and(|p: &ExportOptions| {
+            (p.quality, p.limit_fps, p.resize_percent) == (step.quality, step.limit_fps, step.resize_percent)
+        });
+        if !same {
+            steps.push(step);
         }
     }
     steps
@@ -1363,18 +1350,13 @@ mod tests {
 
     #[test]
     fn fit_steps_stop_at_user_minimums() {
-        assert_eq!(steps_down(5, 25).last(), Some(&25));
-        assert_eq!(steps_down(5, 23).iter().rev().take(2).collect::<Vec<_>>(), vec![&23, &25]);
-        assert!(steps_down(5, 100).is_empty());
-        assert_eq!(steps_down(5, 0).last(), Some(&1));
         let input = frames(10, 33);
         let opt = opts(Format::Webp);
         let low = FitOptions { min_quality: 23, min_fps: 7, min_resize: 25, ..fit(100) };
         let steps = fit_ladder(&input, &opt, &low);
         let last = steps.last().unwrap();
         assert_eq!((last.quality, last.limit_fps, last.resize_percent), (23, Some(7), 25));
-        let fps: Vec<_> = steps.iter().filter_map(|s| s.limit_fps).collect::<std::collections::BTreeSet<_>>().into_iter().rev().collect();
-        assert_eq!(fps, vec![25, 20, 15, 12, 10, 8, 7]);
+        assert!(steps.iter().all(|s| s.quality >= 23 && s.resize_percent >= 25 && s.limit_fps.is_none_or(|f| f >= 7)));
         // 하한이 원래 값 이상이면 그 항목은 낮추지 않는다
         let none_lower = FitOptions { min_quality: 100, min_fps: 60, min_resize: 100, ..fit(100) };
         assert_eq!(fit_ladder(&input, &opt, &none_lower).len(), 1);
@@ -1390,14 +1372,18 @@ mod tests {
         opt.resize_percent = 60;
         // 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값(화질 100, 원래 30 FPS, 100%)부터
         let steps = fit_ladder(&input, &opt, &fit(100));
-        assert_eq!(steps.len(), 26);
-        assert_eq!(steps[..11].iter().map(|s| s.quality).collect::<Vec<_>>(), vec![100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50]);
-        assert!(steps[..11].iter().all(|s| s.limit_fps.is_none() && s.skip_similar.is_none() && s.resize_percent == 100));
-        assert_eq!(steps[11..16].iter().map(|s| s.limit_fps).collect::<Vec<_>>(), [25, 20, 15, 12, 10].map(Some).to_vec());
-        assert_eq!(
-            steps[16..].iter().map(|s| s.resize_percent).collect::<Vec<_>>(),
-            vec![95, 90, 85, 80, 75, 70, 65, 60, 55, 50]
-        );
+        assert_eq!(steps.len(), 31);
+        let first = &steps[0];
+        assert_eq!((first.quality, first.limit_fps, first.skip_similar, first.resize_percent), (100, None, None, 100));
+        // 셋을 함께 같은 비율로 낮춘다: 가운데 단계는 화질·크기 75, FPS는 30과 10의 비율 가운데(약 17)
+        let mid = &steps[15];
+        assert_eq!((mid.quality, mid.limit_fps, mid.resize_percent), (75, Some(17), 75));
+        let last = &steps[30];
+        assert_eq!((last.quality, last.limit_fps, last.resize_percent), (50, Some(10), 50));
+        // 뒤로 갈수록 모든 항목이 같거나 작다
+        let fps = |s: &ExportOptions| s.limit_fps.unwrap_or(30);
+        assert!(steps.windows(2).all(|w| w[1].quality <= w[0].quality && w[1].resize_percent <= w[0].resize_percent && fps(&w[1]) <= fps(&w[0])));
+        assert!(steps.iter().all(|s| s.skip_similar.is_none()));
         // 바꾸면 안 되는 항목은 사용자가 정한 값 그대로
         let none = FitOptions { allow_quality: false, allow_fps: false, allow_resize: false, ..fit(100) };
         let only = fit_ladder(&input, &opt, &none);
@@ -1405,7 +1391,9 @@ mod tests {
         assert_eq!((only[0].quality, only[0].limit_fps, only[0].skip_similar, only[0].resize_percent), (85, Some(15), Some(5), 60));
         let resize_only = fit_ladder(&input, &opt, &FitOptions { allow_resize: true, ..none });
         assert_eq!((resize_only[0].quality, resize_only[0].limit_fps, resize_only[0].resize_percent), (85, Some(15), 100));
-        assert_eq!(resize_only.len(), 11);
+        assert_eq!(resize_only.len(), 31);
+        assert!(resize_only.iter().all(|s| s.quality == 85 && s.limit_fps == Some(15)));
+        assert_eq!(resize_only.last().unwrap().resize_percent, 50);
     }
 
     #[test]
