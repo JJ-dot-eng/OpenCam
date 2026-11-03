@@ -56,7 +56,8 @@ pub struct ExportOptions {
     pub gif_fit_50fps: bool,
 }
 
-/// 용량에 맞추기: 목표 크기와 낮춰도 되는 항목 (저장 창에서 넘어온다)
+/// 용량에 맞추기: 목표 크기와 알아서 바꿔도 되는 항목 (저장 창에서 넘어온다).
+/// 바꿔도 되는 항목은 사용자가 정한 값 대신 가장 큰 값(화질 100, 원래 FPS, 원래 크기)부터 찾는다.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FitOptions {
@@ -77,31 +78,37 @@ pub struct FitInfo {
     pub target_bytes: u64,
 }
 
-/// 시험해 볼 설정 목록. 뒤로 갈수록 작아진다: 화질(50까지) → FPS(20·15·10) → 이미지 크기(50%까지).
-/// 앞 단계에서 낮춘 값은 그대로 두고 다음 단계를 더한다.
+/// 시험해 볼 설정 목록. 맨 앞이 가장 크고 뒤로 갈수록 작아진다: 화질(5씩, 50까지) → FPS → 이미지 크기(5%씩, 50%까지).
+/// 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값에서 시작한다: 화질 100, FPS는 제한·비슷한 장면 건너뛰기 없이
+/// 원래대로, 이미지 크기 100%. 바꾸면 안 되는 항목은 사용자가 정한 값 그대로다. 앞 단계에서 낮춘 값은 그대로 두고 다음 단계를 더한다.
 fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<ExportOptions> {
-    let mut steps = vec![opt.clone()];
     let mut current = opt.clone();
-    if fit.allow_quality && opt.quality > 50 {
-        let mut q = i32::from(opt.quality) - 10;
-        while q >= 50 {
-            current.quality = q as u8;
-            steps.push(current.clone());
-            q -= 10;
-        }
-        if current.quality != 50 {
-            current.quality = 50;
+    if fit.allow_quality {
+        current.quality = 100;
+    }
+    if fit.allow_fps {
+        current.limit_fps = None;
+        current.skip_similar = None;
+        current.skip_similar_time_limit_ms = None;
+    }
+    if fit.allow_resize {
+        current.resize_percent = 100;
+    }
+    let mut steps = vec![current.clone()];
+    if fit.allow_quality {
+        for q in (50..=95).rev().step_by(5) {
+            current.quality = q;
             steps.push(current.clone());
         }
     }
-    // 지금 FPS: 사용자가 정한 제한, 없으면 프레임 시간의 가운데 값으로 셈
+    // 지금 FPS: 제한이 있으면 그 값, 없으면 프레임 시간의 가운데 값으로 셈
     let mut delays: Vec<u32> = frames.iter().map(|f| f.delay_ms.max(1)).collect();
     delays.sort_unstable();
-    let cap = opt.limit_fps.filter(|&f| f > 0).unwrap_or_else(|| {
+    let cap = current.limit_fps.filter(|&f| f > 0).unwrap_or_else(|| {
         delays.get(delays.len() / 2).map_or(0, |d| (1000.0 / *d as f64).round() as u32)
     });
     if fit.allow_fps {
-        for fps in [20, 15, 10] {
+        for fps in [50, 40, 30, 25, 20, 15, 12, 10] {
             if fps < cap {
                 current.limit_fps = Some(fps);
                 steps.push(current.clone());
@@ -109,8 +116,9 @@ fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<Ex
         }
     }
     if fit.allow_resize {
-        for p in [90u64, 80, 70, 60, 50] {
-            let size = ((u64::from(opt.resize_percent) * p + 50) / 100).max(1) as u32;
+        let base = u64::from(current.resize_percent);
+        for p in (50u64..=95).rev().step_by(5) {
+            let size = ((base * p + 50) / 100).max(1) as u32;
             if size < current.resize_percent {
                 current.resize_percent = size;
                 steps.push(current.clone());
@@ -129,7 +137,8 @@ fn fit_step_text(step: &ExportOptions) -> String {
 /// 목표 크기 안에 들어오도록 설정을 낮춰 저장한다 (GIF·WebP만).
 /// 먼저 녹화의 일부(고르게 뽑은 5구간, 약 1/5)만 저장해 보고 길이 비율로 전체 크기를 짐작해서,
 /// 목표의 95% 안에 드는 가장 덜 낮춘 설정을 반씩 좁혀 찾는다. 그 설정으로 실제로 저장해 보고
-/// 목표를 넘으면 한 단계 더 낮춘다(전체 저장은 최대 4번). 끝까지 넘어도 마지막 결과를 저장한다.
+/// 목표를 넘으면 한 단계 더 낮추고, 목표의 80%도 안 되면 한 단계 높여 본다(전체 저장은 최대 4번).
+/// 목표 안에 든 것 중 가장 큰 설정을 남기고, 끝까지 넘으면 가장 작게 해 본 결과를 저장한다.
 /// 저장은 임시 폴더에 한 뒤 옮기므로, 중간에 실패해도 원래 있던 파일은 그대로다.
 pub fn export_fit(
     frames: &[Frame],
@@ -197,35 +206,60 @@ pub fn export_fit(
     };
     // 실제 저장은 진행률 50~100%, 한 번에 12.5%씩
     let result = (|| -> Result<(Vec<PathBuf>, FitInfo)> {
-        let temp = dir.join(format!("fit.{}", opt.format.ext()));
+        // 목표 안에 든 것 중 가장 큰 설정(번호가 작은 것)과, 목표를 넘은 것 중 가장 작은 설정(번호가 큰 것)
+        let mut best: Option<(usize, PathBuf)> = None;
+        let mut over: Option<(usize, PathBuf)> = None;
         for attempt in 0..4 {
             let step = &steps[index];
+            let temp = dir.join(format!("fit{attempt}.{}", opt.format.ext()));
             let message = format!("{}번째 저장 - {}", attempt + 1, fit_step_text(step));
             let base = 0.5 + attempt as f32 * 0.125;
             export(frames, &temp, step, s, &|p, _| progress(base + p.clamp(0.0, 1.0) * 0.125, &message))?;
             let size = std::fs::metadata(&temp)?.len();
-            if size <= fit.target_bytes || index + 1 == steps.len() || attempt == 3 {
-                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    std::fs::create_dir_all(parent)?;
+            if size <= fit.target_bytes {
+                if best.as_ref().is_none_or(|b| index < b.0) {
+                    best = Some((index, temp));
                 }
-                // 다른 드라이브로는 이름 바꾸기가 안 되므로 복사한다
-                if std::fs::rename(&temp, path).is_err() {
-                    std::fs::copy(&temp, path)?;
-                    std::fs::remove_file(&temp)?;
+                // 목표보다 한참 작으면 한 단계 큰 설정도 해 본다 (그 설정이 넘는다는 걸 이미 알면 빼고)
+                let far_under = u128::from(size) * 100 < u128::from(fit.target_bytes) * 80;
+                if far_under && index > 0 && over.as_ref().is_none_or(|o| o.0 < index - 1) {
+                    index -= 1;
+                    continue;
                 }
-                progress(1.0, "저장 완료");
-                let info = FitInfo {
-                    quality: step.quality,
-                    limit_fps: step.limit_fps,
-                    resize_percent: step.resize_percent,
-                    fitted: size <= fit.target_bytes,
-                    target_bytes: fit.target_bytes,
-                };
-                return Ok((vec![path.to_path_buf()], info));
+                break;
+            }
+            if over.as_ref().is_none_or(|o| index > o.0) {
+                over = Some((index, temp));
+            }
+            // 넘었는데 이미 목표 안에 든 결과가 있거나, 더 낮출 단계가 없으면 그만
+            if best.is_some() || index + 1 == steps.len() {
+                break;
             }
             index += 1;
         }
-        unreachable!()
+        let (index, temp, fitted) = match (best, over) {
+            (Some((i, t)), _) => (i, t, true),
+            (None, Some((i, t))) => (i, t, false),
+            (None, None) => bail!("저장한 결과가 없습니다"),
+        };
+        let step = &steps[index];
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        // 다른 드라이브로는 이름 바꾸기가 안 되므로 복사한다
+        if std::fs::rename(&temp, path).is_err() {
+            std::fs::copy(&temp, path)?;
+            std::fs::remove_file(&temp)?;
+        }
+        progress(1.0, "저장 완료");
+        let info = FitInfo {
+            quality: step.quality,
+            limit_fps: step.limit_fps,
+            resize_percent: step.resize_percent,
+            fitted,
+            target_bytes: fit.target_bytes,
+        };
+        Ok((vec![path.to_path_buf()], info))
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -1319,15 +1353,26 @@ mod tests {
         let mut opt = opts(Format::Gif);
         opt.quality = 85;
         opt.limit_fps = Some(15);
+        opt.skip_similar = Some(5);
+        opt.resize_percent = 60;
+        // 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값(화질 100, 원래 30 FPS, 100%)부터
         let steps = fit_ladder(&input, &opt, &fit(100));
-        assert_eq!(steps.iter().map(|s| s.quality).collect::<Vec<_>>(), vec![85, 75, 65, 55, 50, 50, 50, 50, 50, 50, 50]);
-        assert_eq!(steps[5].limit_fps, Some(10));
-        assert_eq!(steps[6..].iter().map(|s| s.resize_percent).collect::<Vec<_>>(), vec![90, 80, 70, 60, 50]);
+        assert_eq!(steps.len(), 26);
+        assert_eq!(steps[..11].iter().map(|s| s.quality).collect::<Vec<_>>(), vec![100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50]);
+        assert!(steps[..11].iter().all(|s| s.limit_fps.is_none() && s.skip_similar.is_none() && s.resize_percent == 100));
+        assert_eq!(steps[11..16].iter().map(|s| s.limit_fps).collect::<Vec<_>>(), [25, 20, 15, 12, 10].map(Some).to_vec());
+        assert_eq!(
+            steps[16..].iter().map(|s| s.resize_percent).collect::<Vec<_>>(),
+            vec![95, 90, 85, 80, 75, 70, 65, 60, 55, 50]
+        );
+        // 바꾸면 안 되는 항목은 사용자가 정한 값 그대로
         let none = FitOptions { allow_quality: false, allow_fps: false, allow_resize: false, ..fit(100) };
-        assert_eq!(fit_ladder(&input, &opt, &none).len(), 1);
-        opt.quality = 45;
-        let quality_only = FitOptions { allow_quality: true, ..none };
-        assert_eq!(fit_ladder(&input, &opt, &quality_only).len(), 1);
+        let only = fit_ladder(&input, &opt, &none);
+        assert_eq!(only.len(), 1);
+        assert_eq!((only[0].quality, only[0].limit_fps, only[0].skip_similar, only[0].resize_percent), (85, Some(15), Some(5), 60));
+        let resize_only = fit_ladder(&input, &opt, &FitOptions { allow_resize: true, ..none });
+        assert_eq!((resize_only[0].quality, resize_only[0].limit_fps, resize_only[0].resize_percent), (85, Some(15), 100));
+        assert_eq!(resize_only.len(), 11);
     }
 
     #[test]
@@ -1344,7 +1389,7 @@ mod tests {
         let s = Settings::default();
         let path = std::env::temp_dir().join(format!("opencam_fit_test_{}.webp", std::process::id()));
         let (_, generous) = export_fit(&input, &path, &opt, &fit(u64::MAX), &s, &|_, _| {}).unwrap();
-        assert!(generous.fitted && generous.quality == opt.quality && path.exists());
+        assert!(generous.fitted && generous.quality == 100 && generous.resize_percent == 100 && path.exists());
         let largest = std::fs::metadata(&path).unwrap().len();
         let (_, tiny) = export_fit(&input, &path, &opt, &fit(1), &s, &|_, _| {}).unwrap();
         let smallest = std::fs::metadata(&path).unwrap().len();
@@ -1365,7 +1410,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("opencam_fit_test_{}.gif", std::process::id()));
         let s = Settings::default();
         let (_, info) = export_fit(&input, &path, &opts(Format::Gif), &fit(1_000_000), &s, &|_, _| {}).unwrap();
-        assert!(info.fitted && info.quality == 80 && path.exists());
+        assert!(info.fitted && info.quality == 100 && path.exists());
+        // 사용자가 낮춰 둔 값(화질 60, 20 FPS, 크기 50%)이 있어도 목표가 넉넉하면 가장 큰 값으로 저장한다
+        let mut low = opts(Format::Gif);
+        low.quality = 60;
+        low.limit_fps = Some(20);
+        low.skip_similar = Some(10);
+        low.resize_percent = 50;
+        let (_, info) = export_fit(&input, &path, &low, &fit(1_000_000), &s, &|_, _| {}).unwrap();
+        assert_eq!((info.fitted, info.quality, info.limit_fps, info.resize_percent), (true, 100, None, 100));
         assert!(export_fit(&input, &path, &opts(Format::Png), &fit(100), &s, &|_, _| {}).is_err());
         std::fs::remove_file(path).unwrap();
     }
