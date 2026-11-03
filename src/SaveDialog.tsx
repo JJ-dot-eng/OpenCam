@@ -439,10 +439,6 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
                         </span>
                       </div>
                     </Field>
-                    <p className="hint">
-                      고른 항목은 가장 높은 값(화질 100, 원래 FPS, 원래 크기)에서 시작해 화질 → FPS → 이미지 크기 순으로 최소값까지 낮추며
-                      목표에 가장 가깝게 맞춥니다. 고르지 않은 항목은 직접 정한 값 그대로 씁니다.
-                    </p>
                     {!allowQuality && (
                       <Field label="화질">
                         <Slider label="화질" value={quality} min={1} max={100} disabled={working} onChange={setQuality} />
