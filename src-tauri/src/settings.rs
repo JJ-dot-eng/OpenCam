@@ -115,6 +115,13 @@ pub struct Settings {
     pub reduce_keep_speed: bool,
 }
 
+impl Settings {
+    /// 편집 메모리 한도 (바이트). 너무 작게 적어도 64MB는 쓴다.
+    pub fn max_edit_bytes(&self) -> usize {
+        self.max_edit_memory_mb.max(64) as usize * 1024 * 1024
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         let pictures =

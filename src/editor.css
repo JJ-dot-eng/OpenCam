@@ -355,14 +355,6 @@ input[type="range"] {
   font-weight: 500;
 }
 
-.ed-dim {
-  color: var(--dim);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 6px;
-}
-
 .ed-stage {
   position: relative;
   flex: 1;

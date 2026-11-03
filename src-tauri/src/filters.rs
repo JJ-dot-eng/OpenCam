@@ -1,15 +1,7 @@
 //! 필터 2차분: 배경 흐림, 색상 곡선, 색상 채널, 화이트밸런스, 노이즈 감소, 뽀샤시, 카툰, 판화,
 //! 아스키 아트, 잔상 효과, 크로마키, 지우개. 모두 RGBA 한 장을 제자리에서 바꾼다(잔상 효과만 프레임 사이).
 
-use crate::effects::{Region, Rgb, box_blur};
-
-fn clamp8(v: f32) -> u8 {
-    v.round().clamp(0.0, 255.0) as u8
-}
-
-fn luma(p: &[u8]) -> f32 {
-    0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
-}
+use crate::effects::{Region, Rgb, box_blur, clamp8, luma};
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0).max(1e-6)).clamp(0.0, 1.0);

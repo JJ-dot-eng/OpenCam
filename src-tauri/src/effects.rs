@@ -161,11 +161,11 @@ pub enum Filter {
     },
 }
 
-fn clamp8(v: f32) -> u8 {
+pub(crate) fn clamp8(v: f32) -> u8 {
     v.round().clamp(0.0, 255.0) as u8
 }
 
-fn luma(p: &[u8]) -> f32 {
+pub(crate) fn luma(p: &[u8]) -> f32 {
     0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
 }
 

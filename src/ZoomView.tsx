@@ -1,10 +1,10 @@
 // 줌 애니메이션 화면: 확대할 영역을 고르면, 지금 프레임부터 그 영역이 커지며 보였다가 돌아간다.
 
 import { useEffect, useRef, useState } from "react";
-import { api, errText, FrameInfo, frameUrl, Region, ZoomFx, ZoomScale } from "./api";
+import { api, FrameInfo, frameUrl, Region, ZoomFx, ZoomScale } from "./api";
 import { Check, isModalOpen } from "./dialogs";
 import SidePanel from "./SidePanel";
-import { Field, NumInput, PanelFoot, Section, Slider, useReportDirty } from "./Panel";
+import { Field, NumInput, PanelFoot, Section, Slider, usePngPreview, useReportDirty } from "./Panel";
 
 const SCALES: [ZoomScale, string][] = [
   ["goodFit", "적당한 크기"],
@@ -66,26 +66,7 @@ export default function ZoomView({ frame, index, remainMs, scale, onApply, onCan
   const valid = Number.isFinite(totalSec) && totalSec > 0;
 
   // 결과 미리보기 (가장 크게 확대된 순간)
-  useEffect(() => {
-    if (!showResult) return;
-    let url: string | null = null;
-    let alive = true;
-    const t = window.setTimeout(async () => {
-      try {
-        const buf = await api.zoomPreview(frame.id, zoom);
-        if (!alive) return;
-        url = URL.createObjectURL(new Blob([buf], { type: "image/png" }));
-        setPreview(url);
-      } catch (e) {
-        onError(errText(e));
-      }
-    }, 120);
-    return () => {
-      alive = false;
-      window.clearTimeout(t);
-      if (url) window.setTimeout(() => URL.revokeObjectURL(url!), 2000);
-    };
-  }, [key, frame.id, showResult]);
+  usePngPreview(showResult ? () => api.zoomPreview(frame.id, zoom) : null, setPreview, onError, [key, frame.id, showResult]);
 
   useEffect(() => {
     const toImage = (e: MouseEvent) => {

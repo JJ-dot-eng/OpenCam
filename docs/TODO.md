@@ -4,6 +4,20 @@
 다음 기능 후보는 [next-features.md](next-features.md), 개발할 때 알아 둘 것은 [AGENTS.md](../AGENTS.md).
 (마지막 정리: 2026-11-03, 용량에 맞춰 저장 만든 뒤)
 
+## 이번 작업: 코드 정리·최적화 (2026-11-03, Claude Code 직접, Sonnet 도우미 2명이 조사)
+
+- 기능은 그대로 두고 안 쓰는 코드와 겹친 코드를 정리했다. 화면 코드는 `tsc`의 안 쓰는 변수 검사가 이미 켜져 있어 남은 것이 적었다.
+  - 지움: 화면 어디서도 부르지 않던 "클립보드 그림을 프레임에 넣기" 명령(`paste_clipboard_image`, `api.pasteClipboardImage`)과 그것만 쓰던 `Project::replace_pixels`·`insert_frame`, 안 쓰는 `rgbToHex`, CSS `.ed-dim`, 쓰지 않는 windows 기능 3개(`Win32_UI_HiDpi`, `Win32_System_Threading`, `Win32_Media`). 프레임 복사·붙여넣기와 "프레임 그림 복사", 삽입 화면의 클립보드 이미지는 그대로다.
+  - 합침: 저장 명령 4곳의 "프레임·설정 복사"(`snapshot`), 편집 메모리 한도 계산 4곳(`Settings::max_edit_bytes`), 썸네일 크기 2곳(`thumb_size`), `clamp8`·`luma`(filters.rs가 effects.rs 것을 씀), 필터·줌 화면의 미리보기 받기(`Panel.tsx`의 `usePngPreview`).
+- 빨라진 것(1280×720 150장, 개발용 실행에서 잼):
+  - APNG 저장 7.7초 → 3.9초: 프레임마다 팔레트 색 번호를 매기는 일을 여러 코어로 나눔. 결과는 예전과 바이트까지 같다(각 프레임 계산이 공유 상태를 바꾸지 않음).
+  - WebM 저장 8.1초 → 5.9초: VP9에 `-row-mt 1`(AVIF는 이미 켜져 있었음). 화질 설정은 같고 파일이 약 3% 커졌다(3.2 → 3.3MB).
+  - 그 밖에 잰 것: GIF 2.2초, MP4 0.5초, 크기 50% 0.14초, 흐림 0.57초, 샤픈 0.33초 — 충분히 빨라 손대지 않았다.
+- 발견했지만 고치지 못한 것: APNG 256색에서 imagequant가 색 번호를 매길 때 프레임마다 팔레트를 조금씩 다듬는데, 파일에는 마지막 프레임의 팔레트 하나만 들어가 앞 프레임 색이 아주 조금 어긋날 수 있다(예전부터). 팔레트를 고정 색으로 다시 넣는 방법(`from_palette`, 고정 색 히스토그램)은 imagequant 4.4.1 안에서 멈춰서(`mediancut.rs` assert) 되돌렸다.
+- 조사만 하고 하지 않은 것(구조가 크거나 효과가 작음): 세로 흐림의 캐시 접근, 노이즈 감소 정렬, 저장 전 가공의 압축·해제 한 번 더, 녹화 스레드의 LZ4 압축 분리, 편집 중 프로젝트 잠금을 오래 잡는 것.
+- 확인한 것: `cargo test` 142개, `npx tsc --noEmit`, 노드 테스트 55개, `cargo build` 경고 없음. 확인 못 한 것: 실제 앱에서 필터·줌 미리보기, APNG·WebM 저장.
+- 같은 날 저장 창은 WebP가 맨 앞이고 처음부터 골라져 있게 바꿈(사용자 요청, 커밋 0cb3ead).
+
 ## 이번 작업: 용량에 맞춰 저장 (2026-11-03, Claude Code 감독 + Codex 구현, 브랜치 feat/fit-to-size)
 
 - 기획 [next-features.md](next-features.md)의 C(목표 용량 저장)를 GIF·WebP에만 먼저 만들었다. 사용자가 "20MB 용량으로 저장"을 원해서 기본 목표를 20MB로 했다.

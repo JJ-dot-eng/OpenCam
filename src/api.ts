@@ -435,7 +435,6 @@ export const api = {
   renameFile: (path: string, newName: string) => invoke<string>("rename_file", { path, newName }),
   fileBytes: (path: string) => invoke<ArrayBuffer>("file_bytes", { path }),
   copyFrameImage: (index: number) => invoke<void>("copy_frame_image", { index }),
-  pasteClipboardImage: (index: number, replace: boolean) => invoke<ProjectView>("paste_clipboard_image", { index, replace }),
   clipboardImagePng: () => invoke<ArrayBuffer>("clipboard_image_png"),
   saveFrameImage: (index: number, path: string) => invoke<void>("save_frame_image", { index, path }),
   exportFrames: (indices: number[], dir: string, prefix: string, format: string) =>
@@ -506,10 +505,6 @@ export function errText(e: unknown): string {
 export function hexToRgb(hex: string): Rgb {
   const v = parseInt(hex.slice(1), 16);
   return [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
-}
-
-export function rgbToHex([r, g, b]: Rgb): string {
-  return "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
 }
 
 /** 파일 크기·날짜 표시 (오늘은 시:분:초, 올해는 월-일 시:분, 그 밖은 년-월-일) */

@@ -848,6 +848,7 @@ fn join_webp_parts(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
 
 /// 모든 프레임이 함께 쓸 256색 팔레트로 줄인다 (APNG는 팔레트가 하나뿐이라서).
 /// 돌려주는 값: (RGB 팔레트, 투명도 표, 프레임마다 색 번호)
+/// 색 번호 매기기는 공유 상태를 바꾸지 않아 결과를 복사해 여러 코어에서 나눠 해도 한 줄로 할 때와 같다.
 fn quantize_shared(frames: &[Frame], quality: u8) -> Result<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>)> {
     let mut attr = imagequant::new();
     attr.set_quality(0, quality.clamp(1, 100))?;
@@ -862,16 +863,15 @@ fn quantize_shared(frames: &[Frame], quality: u8) -> Result<(Vec<u8>, Vec<u8>, V
     }
     let mut res = hist.quantize(&attr)?;
     res.set_dithering_level(1.0)?;
-    let mut indices = Vec::with_capacity(frames.len());
-    let mut palette = vec![];
-    for f in frames {
-        let (pal, idx) = res.remapped(&mut to_img(f)?)?;
-        palette = pal;
-        indices.push(idx);
-    }
+    let mapped = frames
+        .par_iter()
+        .map_init(|| res.clone(), |res, f| -> Result<_> { Ok(res.remapped(&mut to_img(f)?)?) })
+        .collect::<Result<Vec<_>>>()?;
+    // 팔레트는 예전처럼 마지막 프레임 것을 쓴다
+    let palette = mapped.last().map(|(pal, _)| pal.clone()).unwrap_or_default();
     let rgb = palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect();
     let trns = palette.iter().map(|c| c.a).collect();
-    Ok((rgb, trns, indices))
+    Ok((rgb, trns, mapped.into_iter().map(|(_, idx)| idx).collect()))
 }
 
 /// APNG 프레임 시간은 "분자/분모 초"이고 둘 다 u16이다.
@@ -1026,7 +1026,7 @@ fn video(frames: &[Frame], path: &Path, format: Format, quality: u8, s: &Setting
         }
         _ => {
             let crf = (63.0 - q * 0.55).round() as u32; // 화질 80 → crf 19
-            cmd.args(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", &crf.to_string(), "-pix_fmt", "yuva420p"]);
+            cmd.args(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", &crf.to_string(), "-pix_fmt", "yuva420p", "-row-mt", "1"]);
         }
     }
     cmd.arg(path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());

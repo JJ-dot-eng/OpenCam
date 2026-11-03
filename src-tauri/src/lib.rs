@@ -371,7 +371,7 @@ fn start_recording(app: &AppHandle) -> CmdResult<()> {
         max_ms: (!no_limit).then(|| s.max_rec_sec.clamp(1, 3600) as u64 * 1000),
         direct,
         drop_frames_after_limit: s.rec_direct_save_drop_frames,
-        max_bytes: s.max_edit_memory_mb.max(64) as usize * 1024 * 1024,
+        max_bytes: s.max_edit_bytes(),
         cursor: CursorOptions {
             draw: s.capture_cursor,
             highlight: s.cursor_highlight,
@@ -893,15 +893,18 @@ struct ExportResult {
     fit: Option<export::FitInfo>,
 }
 
+/// 저장에 쓸 프레임 목록과 설정을 복사해 온다 (픽셀은 함께 쓰므로 복사가 싸다). 잠금은 바로 푼다.
+fn snapshot(app: &AppHandle) -> (Vec<frame::Frame>, Settings) {
+    let state = app.state::<AppState>();
+    let frames = state.project.lock().frames.clone();
+    let s = state.settings.lock().clone();
+    (frames, s)
+}
+
 /// 이번 저장으로 덮어쓰게 될 파일을 찾는다.
 #[tauri::command]
 async fn export_conflicts(app: AppHandle, opts: ExportOptions, path: String) -> CmdResult<Vec<PathBuf>> {
-    let (frames, s) = {
-        let state = app.state::<AppState>();
-        let frames = state.project.lock().frames.clone();
-        let s = state.settings.lock().clone();
-        (frames, s)
-    };
+    let (frames, s) = snapshot(&app);
     tauri::async_runtime::spawn_blocking(move || {
         export::planned_paths(&frames, Path::new(&path), &opts, &s).into_iter().filter(|p| p.exists()).collect()
     })
@@ -912,12 +915,7 @@ async fn export_conflicts(app: AppHandle, opts: ExportOptions, path: String) -> 
 /// 저장한 파일 목록과 전체 크기를 돌려준다.
 #[tauri::command]
 async fn export_project(app: AppHandle, opts: ExportOptions, path: String) -> CmdResult<ExportResult> {
-    let (frames, s) = {
-        let state = app.state::<AppState>();
-        let frames = state.project.lock().frames.clone();
-        let s = state.settings.lock().clone();
-        (frames, s)
-    };
+    let (frames, s) = snapshot(&app);
     let h = app.clone();
     let paths = tauri::async_runtime::spawn_blocking(move || {
         export::export(&frames, Path::new(&path), &opts, &s, &|progress, msg| {
@@ -934,12 +932,7 @@ async fn export_project(app: AppHandle, opts: ExportOptions, path: String) -> Cm
 
 #[tauri::command]
 async fn export_project_fit(app: AppHandle, opts: ExportOptions, fit: export::FitOptions, path: String) -> CmdResult<ExportResult> {
-    let (frames, s) = {
-        let state = app.state::<AppState>();
-        let frames = state.project.lock().frames.clone();
-        let s = state.settings.lock().clone();
-        (frames, s)
-    };
+    let (frames, s) = snapshot(&app);
     let h = app.clone();
     let (paths, fit) = tauri::async_runtime::spawn_blocking(move || {
         export::export_fit(&frames, Path::new(&path), &opts, &fit, &s, &|progress, msg| {
@@ -953,12 +946,7 @@ async fn export_project_fit(app: AppHandle, opts: ExportOptions, fit: export::Fi
 
 #[tauri::command]
 async fn estimate_size(app: AppHandle, opts: ExportOptions) -> CmdResult<u64> {
-    let (frames, s) = {
-        let state = app.state::<AppState>();
-        let frames = state.project.lock().frames.clone();
-        let s = state.settings.lock().clone();
-        (frames, s)
-    };
+    let (frames, s) = snapshot(&app);
     tauri::async_runtime::spawn_blocking(move || export::estimate_size(&frames, &opts, &s))
         .await
         .map_err(err)?
@@ -1025,12 +1013,17 @@ fn frame_png_from(project: &Mutex<Project>, path: &str) -> Option<Vec<u8>> {
     let f = project.lock().find(id)?.clone();
     let (mut w, mut h, mut px) = (f.width, f.height, f.rgba());
     if thumb {
-        let scale = (160.0 / w as f32).min(120.0 / h as f32).min(1.0);
-        let (tw, th) = (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1));
+        let (tw, th) = thumb_size(w, h);
         px = project::resize_rgba(w, h, &px, tw, th, true);
         (w, h) = (tw, th);
     }
     encode_png(w, h, &px)
+}
+
+/// 썸네일 크기: 160×120 안에 비율을 지켜 넣는다 (키우지는 않는다)
+fn thumb_size(w: u32, h: u32) -> (u32, u32) {
+    let scale = (160.0 / w as f32).min(120.0 / h as f32).min(1.0);
+    (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1))
 }
 
 /// 화면에 보여줄 용도의 빠른 PNG
@@ -1113,7 +1106,7 @@ async fn probe_video(path: String) -> CmdResult<import::VideoInfo> {
 // ---------- 새로 만들기·콜라주 ----------
 
 fn memory_limit(app: &AppHandle) -> usize {
-    app.state::<AppState>().settings.lock().max_edit_memory_mb.max(64) as usize * 1024 * 1024
+    app.state::<AppState>().settings.lock().max_edit_bytes()
 }
 
 /// 한 색(또는 투명) 배경의 빈 영상
@@ -1284,27 +1277,6 @@ fn clipboard_rgba() -> CmdResult<(u32, u32, Vec<u8>)> {
     let mut cb = arboard::Clipboard::new().map_err(err)?;
     let img = cb.get_image().map_err(|_| "클립보드에 이미지가 없습니다!".to_string())?;
     Ok((img.width as u32, img.height as u32, img.bytes.into_owned()))
-}
-
-/// 클립보드 그림을 i번 프레임에 넣는다. replace면 그 프레임을 바꾸고, 아니면 바로 뒤에 새 프레임으로.
-#[tauri::command]
-fn paste_clipboard_image(state: State<AppState>, index: usize, replace: bool) -> CmdResult<ProjectView> {
-    let (w, h, px) = clipboard_rgba()?;
-    let mut p = state.project.lock();
-    let Some(f) = p.frames.get(index).cloned() else {
-        return Err("프레임이 없습니다".into());
-    };
-    let fitted = import::fit_rgba(w, h, &px, f.width, f.height, import::Fit::Contain);
-    let ok = if replace {
-        p.replace_pixels(index, f.width, f.height, &fitted)
-    } else {
-        p.insert_frame(index + 1, frame::Frame::from_rgba(f.width, f.height, &fitted, f.delay_ms))
-    };
-    if !ok {
-        return Err("클립보드 이미지를 넣지 못했습니다".into());
-    }
-    let sel = if replace { vec![index] } else { vec![index + 1] };
-    Ok(view(&p, Some(sel), Some("클립보드 이미지를 넣었습니다".into())))
 }
 
 /// 클립보드 그림 PNG (삽입 화면에서 이미지로 쓰기)
@@ -1529,8 +1501,7 @@ fn recovery_list() -> Vec<recovery::Entry> {
 async fn recovery_thumb(id: String) -> CmdResult<tauri::ipc::Response> {
     tauri::async_runtime::spawn_blocking(move || {
         let f = recovery::first_frame(&recovery::entry_dir(&recovery::root(), &id)?)?;
-        let scale = (160.0 / f.width as f32).min(120.0 / f.height as f32).min(1.0);
-        let (tw, th) = (((f.width as f32 * scale) as u32).max(1), ((f.height as f32 * scale) as u32).max(1));
+        let (tw, th) = thumb_size(f.width, f.height);
         let px = project::resize_rgba(f.width, f.height, &f.rgba(), tw, th, true);
         encode_png(tw, th, &px).ok_or_else(|| anyhow::anyhow!("썸네일을 만들지 못했습니다"))
     })
@@ -1592,7 +1563,7 @@ fn import_progress(app: &AppHandle) -> impl Fn(f32, &str) + Sync + use<> {
 /// GIF·WebP·APNG·이미지 여러 장 열기. 크기가 다르면 첫 그림에 맞춘다.
 #[tauri::command]
 async fn import_files(app: AppHandle, paths: Vec<String>, still_ms: u32, fit: import::Fit) -> CmdResult<ProjectView> {
-    let max = app.state::<AppState>().settings.lock().max_edit_memory_mb.max(64) as usize * 1024 * 1024;
+    let max = memory_limit(&app);
     let progress = import_progress(&app);
     let loaded =
         tauri::async_runtime::spawn_blocking(move || import::load_files(&paths, still_ms, fit, max, &progress))
@@ -1614,7 +1585,7 @@ async fn import_video(
     width: u32,
     height: u32,
 ) -> CmdResult<ProjectView> {
-    let max = app.state::<AppState>().settings.lock().max_edit_memory_mb.max(64) as usize * 1024 * 1024;
+    let max = memory_limit(&app);
     let progress = import_progress(&app);
     let loaded = tauri::async_runtime::spawn_blocking(move || {
         import::load_video(&path, start_ms, end_ms, fps, width, height, max, &progress)
@@ -1999,7 +1970,6 @@ pub fn run() {
             rename_file,
             file_bytes,
             copy_frame_image,
-            paste_clipboard_image,
             clipboard_image_png,
             save_frame_image,
             export_frames,

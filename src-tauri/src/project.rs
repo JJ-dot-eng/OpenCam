@@ -677,31 +677,6 @@ impl Project {
         self.map_all(move |w, h, px| crate::superres::upscale_rgba(w, h, &px, k));
     }
 
-    /// i번 프레임의 그림을 바꾼다 (시간은 그대로)
-    pub fn replace_pixels(&mut self, i: usize, w: u32, h: u32, rgba: &[u8]) -> bool {
-        let Some(f) = self.frames.get(i) else { return false };
-        if (f.width, f.height) != (w, h) {
-            return false;
-        }
-        let d = f.delay_ms;
-        self.checkpoint();
-        self.frames[i] = Frame::from_rgba(w, h, rgba, d);
-        true
-    }
-
-    /// at 자리에 새 프레임을 넣는다 (크기는 다른 프레임과 같아야 한다)
-    pub fn insert_frame(&mut self, at: usize, f: Frame) -> bool {
-        if let Some(first) = self.frames.first()
-            && (first.width, first.height) != (f.width, f.height)
-        {
-            return false;
-        }
-        self.checkpoint();
-        let at = at.min(self.frames.len());
-        self.frames.insert(at, f);
-        true
-    }
-
     /// 맨 뒤에 프레임을 붙인다 (파일 끌어 놓기, 되돌리기 한 번). 붙인 프레임의 번호들.
     /// 붙일 것이 없거나 크기가 다른 프레임이 있으면 붙이지 않고 None.
     pub fn append(&mut self, items: Vec<Frame>) -> Option<Vec<usize>> {

@@ -2,11 +2,11 @@
 
 import { useContext, useEffect, useRef, useState } from "react";
 import { IconEye } from "@tabler/icons-react";
-import { api, errText, Filter, FrameInfo, frameUrl, hexToRgb, Region } from "./api";
+import { api, Filter, FrameInfo, frameUrl, hexToRgb, Region } from "./api";
 import { Check, isModalOpen } from "./dialogs";
 import { promptAsk } from "./ask";
 import SidePanel from "./SidePanel";
-import { ColorInput, defaultScope, Field, FrameContext, PanelFoot, Scope, ScopePicker, scopeSel, Section, Slider, useReportDirty } from "./Panel";
+import { ColorInput, defaultScope, Field, FrameContext, PanelFoot, Scope, ScopePicker, scopeSel, Section, Slider, usePngPreview, useReportDirty } from "./Panel";
 
 type Kind = Filter["kind"];
 
@@ -284,30 +284,11 @@ export default function FilterView({ frame, scale, onApply, onCancel, onError }:
     (st.regionMode !== "all" && DEFS.some((d) => d.region && st.on[d.kind])) ||
     DEFS.some((d) => d.regionRequired && st.on[d.kind]);
 
-  // 필터가 바뀌면 잠깐 기다렸다가 미리보기를 새로 만든다
+  // 필터가 바뀌면 잠깐 기다렸다가 미리보기를 새로 만든다. 필터가 하나도 없으면 원본을 보여 준다.
   useEffect(() => {
-    if (filters.length === 0) {
-      setPreview(null);
-      return;
-    }
-    let url: string | null = null;
-    let alive = true;
-    const t = window.setTimeout(async () => {
-      try {
-        const buf = await api.filterPreview(frame.id, filters);
-        if (!alive) return;
-        url = URL.createObjectURL(new Blob([buf], { type: "image/png" }));
-        setPreview(url);
-      } catch (e) {
-        onError(errText(e));
-      }
-    }, 120);
-    return () => {
-      alive = false;
-      window.clearTimeout(t);
-      if (url) window.setTimeout(() => URL.revokeObjectURL(url!), 2000);
-    };
-  }, [key, frame.id]);
+    if (filters.length === 0) setPreview(null);
+  }, [key]);
+  usePngPreview(filters.length ? () => api.filterPreview(frame.id, filters) : null, setPreview, onError, [key, frame.id]);
 
   useEffect(() => {
     const toImage = (e: MouseEvent) => {

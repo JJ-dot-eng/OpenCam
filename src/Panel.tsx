@@ -3,6 +3,7 @@
 
 import { createContext, ReactNode, useContext, useEffect, useState } from "react";
 import { IconChevronDown, IconChevronRight } from "@tabler/icons-react";
+import { errText } from "./api";
 
 /** 지금 편집 상황: 보고 있는 프레임(0부터), 전체 장수, 고른 프레임 */
 export interface FrameCtx {
@@ -19,6 +20,36 @@ export function useReportDirty(dirty: boolean) {
   const report = useContext(DirtyReport);
   useEffect(() => report(dirty), [dirty, report]);
   useEffect(() => () => report(false), [report]);
+}
+
+/** 설정이 바뀌면 잠깐(120ms) 기다렸다가 미리보기 PNG를 받아 Blob URL로 넘긴다. load가 null이면 받지 않는다.
+ *  지난 URL은 새 그림으로 바뀐 뒤에 해제되도록 2초 있다가 푼다. deps가 바뀔 때만 다시 받는다. */
+export function usePngPreview(
+  load: (() => Promise<ArrayBuffer>) | null,
+  onUrl: (url: string) => void,
+  onError: (msg: string) => void,
+  deps: unknown[],
+) {
+  useEffect(() => {
+    if (!load) return;
+    let url: string | null = null;
+    let alive = true;
+    const t = window.setTimeout(async () => {
+      try {
+        const buf = await load();
+        if (!alive) return;
+        url = URL.createObjectURL(new Blob([buf], { type: "image/png" }));
+        onUrl(url);
+      } catch (e) {
+        onError(errText(e));
+      }
+    }, 120);
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+      if (url) window.setTimeout(() => URL.revokeObjectURL(url!), 2000);
+    };
+  }, deps);
 }
 
 // ---------- 섹션 ----------
