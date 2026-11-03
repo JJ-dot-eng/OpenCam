@@ -321,7 +321,6 @@ export default function Recorder() {
       await api.setFullCapture(m);
       fullRef.current = m;
       setFullMonitor(m);
-      showNotice("모니터 전체를 녹화합니다");
     } catch (e) { showNotice(errText(e)); }
   }, [disableFull, relayout, showNotice, remember]);
 
@@ -351,7 +350,6 @@ export default function Recorder() {
       await win.setPosition(new PhysicalPosition(m.x + Math.round((m.w - w) / 2), m.y + Math.round((m.h - h) / 2)));
       await relayout(toolbarBottom);
       setChanged(null);
-      showNotice("녹화 틀을 기본 크기로 화면 가운데에 놓았습니다");
     } catch (e) {
       showNotice(errText(e));
     }
@@ -368,6 +366,7 @@ export default function Recorder() {
     }
   }, [recording, showNotice]);
 
+  // 영역을 바꾼 뒤 "맞췄습니다" 같은 알림은 띄우지 않는다. 정확히 못 맞췄을 때 등 확인할 일만 알린다.
   const fitRect = useCallback(async (r: Rect, activated = true) => {
     try {
       await remember();
@@ -420,7 +419,6 @@ export default function Recorder() {
           if (pos.x !== ux || pos.y !== uy || size.width !== uw || size.height !== uh)
             showNotice("창 크기 또는 위치가 제한되어 정확히 맞추지 못했습니다. 녹화 영역을 확인하세요.");
           else if (onTop && !excluded) showNotice("툴바가 녹화 영역 위에 있어 같이 찍힐 수 있습니다. 툴바 자리를 비워 두세요.");
-          else showNotice("창에 맞췄습니다. 툴바는 놓을 자리가 없어 있던 자리에 둡니다.");
           return;
         }
       }
@@ -438,9 +436,6 @@ export default function Recorder() {
       if (pos.x + actualB !== r.x || pos.y + (toolbarBottom ? actualB : actualT + actualB) !== r.y || actualW !== r.w || actualH !== r.h)
         showNotice("창 크기 또는 위치가 제한되어 정확히 맞추지 못했습니다. 녹화 영역을 확인하세요.");
       else if (!activated) showNotice("창에 맞췄지만 앞으로 가져오지 못했습니다. 가린 창이 없는지 확인하세요.");
-      else if (toolbarBottom !== bottom)
-        showNotice(`툴바가 화면 밖으로 나가서 ${toolbarBottom ? "아래" : "위"}로 옮겼습니다 (설정 '툴바를 아래에')`);
-      else showNotice("선택한 영역에 녹화 틀을 맞췄습니다");
     } catch (e) {
       showNotice(errText(e));
     }
