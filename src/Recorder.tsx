@@ -37,6 +37,9 @@ const FLOAT_BAR = 1080;
 /** 전체 화면에서 툴바를 숨겼을 때 위에 남기는 손잡이 (CSS px). 마우스를 대면 툴바가 내려온다. */
 const HANDLE_W = 120;
 const HANDLE_H = 6;
+/** 기본 녹화 틀 크기 (CSS px, tauri.conf.json의 녹화 창 크기와 같게) */
+const DEFAULT_W = 820;
+const DEFAULT_H = 532;
 
 type ResizeDir = "North" | "South" | "East" | "West" | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
 
@@ -92,9 +95,9 @@ export default function Recorder() {
   const barRef = useRef<HTMLDivElement>(null);
   const hover = useRef(false);
   const hideTimer = useRef(0);
-  // 전체 화면·창 맞추기·모니터 절반 등으로 바꾸기 전의 녹화 틀 (되돌리기 단추용).
-  // 보통 배치일 때만 기억해서, 여러 번 맞춰도 맨 처음 자리로 돌아간다. 직접 끌거나 크기를 바꾸면 잊는다.
-  const [restore, setRestore] = useState<{ x: number; y: number; w: number; h: number; frameOverride: number | null; bottom: boolean } | null>(null);
+  // 전체 화면·창 맞추기·모니터 절반 등으로 바꿨는지 (되돌리기 단추를 보여 줌). 바꾸기 전 툴바 위아래 설정을 기억해
+  // 맞추기가 툴바를 반대쪽으로 옮겼어도 되돌릴 때 원래대로 한다. 직접 끌거나 크기를 바꾸면 잊는다.
+  const [changed, setChanged] = useState<{ bottom: boolean } | null>(null);
   // 배치 계산이 늘 최신 전체 화면 상태를 보게 한다 (끄자마자 이어서 다시 배치할 때 옛 값을 쓰지 않게)
   const fullRef = useRef<Rect | null>(null);
   fullRef.current = fullMonitor;
@@ -264,11 +267,8 @@ export default function Recorder() {
   );
 
   const remember = useCallback(async () => {
-    if (restore || !layout || layout.mode !== "normal") return;
-    const p = await win.outerPosition();
-    const size = await win.innerSize();
-    setRestore({ x: p.x, y: p.y, w: size.width, h: size.height, frameOverride: frameOverride.current, bottom });
-  }, [restore, layout, bottom]);
+    if (!changed) setChanged({ bottom });
+  }, [changed, bottom]);
 
   const toggleRecord = useCallback(async () => {
     try {
@@ -325,24 +325,37 @@ export default function Recorder() {
     } catch (e) { showNotice(errText(e)); }
   }, [disableFull, relayout, showNotice, remember]);
 
-  /** 맞추기 전의 녹화 틀 자리·크기(툴바 위아래까지)로 되돌린다 */
-  const restoreFrame = useCallback(async () => {
-    if (!restore) return;
+  /**
+   * 녹화 틀을 기본 크기로 지금 모니터 가운데에 놓는다 (되돌리기 단추, 영역 목록의 "기본 영역").
+   * 예전 자리로 돌아가면 그 자리가 잘못 잡혔을 때 또 곤란해서, 늘 같은 기본 자리로 돌린다.
+   */
+  const resetFrame = useCallback(async () => {
     try {
+      // 툴바가 있는 모니터 (전체 화면이면 그 모니터)
+      const mons = await api.monitors();
+      const pos = await win.innerPosition();
+      const cx = pos.x + (layout ? layout.bar.x + Math.round(layout.bar.w / 2) : 0);
+      const cy = pos.y + (layout ? layout.bar.y : 0);
+      const m = mons.find((r) => cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h) ?? mons[0];
+      if (!m) throw new Error("모니터를 찾을 수 없습니다");
       await disableFull();
-      frameOverride.current = restore.frameOverride;
-      if (settings && settings.recToolbarBottom !== restore.bottom) await saveSettings({ ...settings, recToolbarBottom: restore.bottom });
-      // 먼저 원래 모니터로 옮긴 뒤 크기를 정한다 (모니터마다 배율이 다를 수 있다)
-      await win.setPosition(new PhysicalPosition(restore.x, restore.y));
-      await win.setSize(new PhysicalSize(restore.w, restore.h));
-      await win.setPosition(new PhysicalPosition(restore.x, restore.y));
-      await relayout(restore.bottom);
-      setRestore(null);
-      showNotice("녹화 틀을 맞추기 전으로 되돌렸습니다");
+      frameOverride.current = null;
+      const toolbarBottom = changed?.bottom ?? bottom;
+      if (settings && settings.recToolbarBottom !== toolbarBottom) await saveSettings({ ...settings, recToolbarBottom: toolbarBottom });
+      // 먼저 그 모니터로 옮겨 배율을 얻은 뒤 크기를 정한다
+      await win.setPosition(new PhysicalPosition(m.x, m.y));
+      const dpr = await win.scaleFactor();
+      const w = Math.min(m.w, Math.round(DEFAULT_W * dpr));
+      const h = Math.min(m.h, Math.round(DEFAULT_H * dpr));
+      await win.setSize(new PhysicalSize(w, h));
+      await win.setPosition(new PhysicalPosition(m.x + Math.round((m.w - w) / 2), m.y + Math.round((m.h - h) / 2)));
+      await relayout(toolbarBottom);
+      setChanged(null);
+      showNotice("녹화 틀을 기본 크기로 화면 가운데에 놓았습니다");
     } catch (e) {
       showNotice(errText(e));
     }
-  }, [restore, settings, saveSettings, disableFull, relayout, showNotice]);
+  }, [layout, changed, bottom, settings, saveSettings, disableFull, relayout, showNotice]);
 
   const chooseWindow = useCallback(async () => {
     if (recording) return;
@@ -554,7 +567,7 @@ export default function Recorder() {
   const grip = (dir: ResizeDir) => (e: React.MouseEvent) => {
     if (e.button !== 0 || recording || mode !== "normal") return;
     e.preventDefault();
-    setRestore(null);
+    setChanged(null);
     if (settings.useSemiTransparency) setResizing(true);
     if (settings.useMagnifier) void api.startMagnifier(layout.dpr).catch((error) => showNotice(errText(error)));
     void win.startResizeDragging(dir).catch((error) => { setResizing(false); showNotice(errText(error)); });
@@ -583,9 +596,13 @@ export default function Recorder() {
         else if (v === "full") fitFullMonitor();
         else if (v === "half") fitMonitor(2);
         else if (v === "quarter") fitMonitor(4);
+        else if (v === "default") resetFrame();
       }}
     >
-      <option value="">{fullMonitor ? "전체 화면" : "영역"}</option>
+      <option value="" hidden>
+        {fullMonitor ? "전체 화면" : "영역"}
+      </option>
+      <option value="default">기본 영역 (화면 가운데)</option>
       <option value="window">창 찾아 맞추기 (Ctrl+Shift+F)</option>
       <option value="area">영역 드래그 선택 (Ctrl+Shift+D)</option>
       <option value="full">모니터 전체 화면</option>
@@ -670,7 +687,7 @@ export default function Recorder() {
         data-tauri-drag-region={drag}
         onMouseDownCapture={(e) => {
           if (e.button !== 0 || mode !== "normal" || !(e.target as HTMLElement).hasAttribute("data-tauri-drag-region")) return;
-          setRestore(null);
+          setChanged(null);
           if (settings.useSemiTransparency) setResizing(true);
         }}
         onMouseEnter={() => {
@@ -711,8 +728,8 @@ export default function Recorder() {
             <IconCamera size={18} />
           </button>
         )}
-        {restore && !recording && (
-          <button className={`rec-btn ${small ? "" : "icon"}`} onClick={restoreFrame} title="녹화 틀을 맞추기 전 자리와 크기로 되돌리기">
+        {(changed || mode !== "normal") && !recording && (
+          <button className={`rec-btn ${small ? "" : "icon"}`} onClick={resetFrame} title="녹화 틀을 기본 크기로 화면 가운데에 되돌리기">
             <IconArrowBackUp size={16} />
             {small && "되돌리기"}
           </button>
@@ -851,6 +868,7 @@ export default function Recorder() {
               else if (v === "window") chooseWindow();
               else if (v === "area") chooseArea();
               else if (v === "full") fitFullMonitor();
+              else if (v === "default") resetFrame();
               else if (v === "settings") openSettings();
               else if (v === "mp4") saveSettings({ ...settings, recDirectSave: !settings.recDirectSave });
               else if (v === "cursor") saveSettings({ ...settings, captureCursor: !settings.captureCursor });
@@ -862,6 +880,7 @@ export default function Recorder() {
             <option value="window">창 찾아 맞추기 (Ctrl+Shift+F)</option>
             <option value="area">영역 드래그 선택 (Ctrl+Shift+D)</option>
             <option value="full">모니터 전체 화면</option>
+            <option value="default">기본 영역 (화면 가운데)</option>
             <option value="newBlank">빈 이미지/영상 만들기…</option>
             <option value="collage">콜라주…</option>
             <option value="manage">파일 관리…</option>
