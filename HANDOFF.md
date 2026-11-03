@@ -9,7 +9,7 @@
 - PR #4·#5를 main에 합치고 0.1.7로 릴리스함.
 - PR #6(GIF 투명 잔상)·#7(붙이기 겹침·작업 변경)·#8(동영상 일부만 읽음 경고·길이 없는 동영상)을 main에 합치고 0.1.8로 릴리스함.
 - PR #9(끌어 놓기·붙이기 잠금 노드 테스트)·#10(창 없는 Rust 미디어 e2e 테스트)·#11(동영상 붙이기 메모리 한도)을 main에 합치고 0.1.9로 릴리스함.
-- GitHub Actions CI가 PR마다 Windows에서 타입 검사·노드 테스트·화면 빌드·Rust 빌드·cargo test를 돌린다.
+- GitHub Actions CI(`.github/workflows/ci.yml`)는 너무 느리다는 사용자 요청으로 지웠다(2026-11-03). 이제 GitHub에서 자동 검사를 하지 않으므로 커밋 전에 이 PC에서 `cargo test`·`npx tsc --noEmit`·노드 테스트를 꼭 돌린다.
 - PR #13(편집 중 썸네일 요청 때문에 앱이 멈출 수 있던 문제)을 main에 합침(main 커밋 fa02b7c). Windows CI 통과(cargo test 123개, 노드 테스트 49개). 실제 앱 확인은 아직.
 - PR #14(프레임 시간 오류 3개: APNG 긴 프레임, APNG·WebP 짧은 시간 보정, 시간 합 넘침)를 main에 합침(main 커밋 f736b7b). Windows CI 통과(cargo test 131개, 노드 테스트 49개). 실제 앱 확인은 아직.
 - PR #15(다른 worktree에서는 여러 AI가 병렬로 작업해도 되게 AGENTS.md 규칙 바꿈, 사용자 승인)를 main에 합침(main 커밋 3d637cc).
@@ -38,6 +38,7 @@
 - AGENTS.md의 Rust 테스트 수(75)는 오래되었다(main 134개). 사용자 허락 없이 고치지 않음.
 
 ## 사용자가 정한 것
+- GitHub CI는 쓰지 않는다(느려서 지움, 2026-11-03). 검사는 이 PC에서 직접 돌린다.
 - 저장소는 GitHub 조직 `OpenCam-dot`에 둔다 (2026-11-03).
 - 저장 창은 WebP를 맨 앞에 두고 처음부터 고른다 (2026-11-03).
 - 당분간 Codex 계열에 일을 넘기지 않는다. 맡기더라도 최소 Sonnet (2026-11-03).
