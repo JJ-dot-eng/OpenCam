@@ -87,6 +87,10 @@ export interface Settings {
   fitAllowQuality: boolean;
   fitAllowFps: boolean;
   fitAllowResize: boolean;
+  /** 용량에 맞추기가 내려가도 되는 가장 낮은 화질·FPS·이미지 크기(%) */
+  fitMinQuality: number;
+  fitMinFps: number;
+  fitMinResize: number;
   limitFps: boolean;
   limitFpsValue: number;
   skipSimilar: boolean;
@@ -175,6 +179,9 @@ export interface FitOptions {
   allowQuality: boolean;
   allowFps: boolean;
   allowResize: boolean;
+  minQuality: number;
+  minFps: number;
+  minResize: number;
 }
 
 export interface FitInfo {

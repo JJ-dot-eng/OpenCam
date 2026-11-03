@@ -83,6 +83,9 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
   const [allowQuality, setAllowQuality] = useState(settings.fitAllowQuality);
   const [allowFps, setAllowFps] = useState(settings.fitAllowFps);
   const [allowResize, setAllowResize] = useState(settings.fitAllowResize);
+  const [minQuality, setMinQuality] = useState(settings.fitMinQuality);
+  const [minFps, setMinFps] = useState(settings.fitMinFps);
+  const [minResize, setMinResize] = useState(settings.fitMinResize);
   const [path, setPath] = useState("");
   const [limitFps, setLimitFps] = useState(settings.limitFps);
   const [limitFpsValue, setLimitFpsValue] = useState(settings.limitFpsValue);
@@ -193,9 +196,12 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         }
       }
       const safeTarget = Math.max(1, Math.min(4000, Math.round(targetMb) || 1));
+      // 최소값은 1~100 (비우면 기본값)
+      const pct = (v: number, def: number) => Math.max(1, Math.min(100, Math.round(v) || def));
+      const mins = { minQuality: pct(minQuality, 25), minFps: pct(minFps, 10), minResize: pct(minResize, 25) };
       await applyFmt();
       const result = fitting
-        ? await api.exportProjectFit(o, { targetBytes: safeTarget * 1_000_000, allowQuality, allowFps, allowResize }, target)
+        ? await api.exportProjectFit(o, { targetBytes: safeTarget * 1_000_000, allowQuality, allowFps, allowResize, ...mins }, target)
         : await api.exportProject(o, target);
       setDone(result);
       onSaved();
@@ -221,6 +227,9 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         fitAllowQuality: allowQuality,
         fitAllowFps: allowFps,
         fitAllowResize: allowResize,
+        fitMinQuality: mins.minQuality,
+        fitMinFps: mins.minFps,
+        fitMinResize: mins.minResize,
         limitFps,
         limitFpsValue: o.limitFps ?? settings.limitFpsValue,
         skipSimilar,
@@ -411,13 +420,28 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
                       />
                     </Field>
                     <Field label="변경 가능">
-                      <Check label="화질" checked={allowQuality} onChange={setAllowQuality} disabled={working} />
-                      <Check label="FPS" checked={allowFps} onChange={setAllowFps} disabled={working} />
-                      <Check label="이미지 크기" checked={allowResize} onChange={setAllowResize} disabled={working} />
+                      {/* 항목마다 한 줄: 바꿔도 되는지 + 내려가도 되는 가장 낮은 값 */}
+                      <div className="fit-allow">
+                        <Check label="화질" checked={allowQuality} onChange={setAllowQuality} disabled={working} />
+                        <span className="fit-min">
+                          최소
+                          <NumInput value={minQuality} min={1} max={100} label="가장 낮은 화질" narrow disabled={working || !allowQuality} onChange={setMinQuality} />
+                        </span>
+                        <Check label="FPS" checked={allowFps} onChange={setAllowFps} disabled={working} />
+                        <span className="fit-min">
+                          최소
+                          <NumInput value={minFps} min={1} max={100} unit="FPS" label="가장 낮은 FPS" disabled={working || !allowFps} onChange={setMinFps} />
+                        </span>
+                        <Check label="이미지 크기" checked={allowResize} onChange={setAllowResize} disabled={working} />
+                        <span className="fit-min">
+                          최소
+                          <NumInput value={minResize} min={1} max={100} unit="%" label="가장 작은 이미지 크기" disabled={working || !allowResize} onChange={setMinResize} />
+                        </span>
+                      </div>
                     </Field>
                     <p className="hint">
-                      고른 항목은 가장 높은 값(화질 100, 원래 FPS, 원래 크기)에서 시작해 화질 → FPS → 이미지 크기 순으로 낮추며 목표에 가장
-                      가깝게 맞춥니다. 고르지 않은 항목은 직접 정한 값 그대로 씁니다.
+                      고른 항목은 가장 높은 값(화질 100, 원래 FPS, 원래 크기)에서 시작해 화질 → FPS → 이미지 크기 순으로 최소값까지 낮추며
+                      목표에 가장 가깝게 맞춥니다. 고르지 않은 항목은 직접 정한 값 그대로 씁니다.
                     </p>
                     {!allowQuality && (
                       <Field label="화질">

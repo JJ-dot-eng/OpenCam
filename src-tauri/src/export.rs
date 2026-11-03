@@ -65,6 +65,10 @@ pub struct FitOptions {
     pub allow_quality: bool,
     pub allow_fps: bool,
     pub allow_resize: bool,
+    /// 내려가도 되는 가장 낮은 화질·FPS·이미지 크기(%)
+    pub min_quality: u8,
+    pub min_fps: u32,
+    pub min_resize: u32,
 }
 
 /// 용량에 맞추기로 실제로 쓴 설정. fitted가 false면 다 낮춰도 목표보다 크다.
@@ -78,7 +82,17 @@ pub struct FitInfo {
     pub target_bytes: u64,
 }
 
-/// 시험해 볼 설정 목록. 맨 앞이 가장 크고 뒤로 갈수록 작아진다: 화질(5씩, 50까지) → FPS → 이미지 크기(5%씩, 50%까지).
+/// 100에서 step씩 내려 min까지 (100은 빼고, 마지막은 꼭 min)
+fn steps_down(step: u32, min: u32) -> Vec<u32> {
+    let min = min.clamp(1, 100);
+    let mut out: Vec<u32> = (1..).map(|k| 100u32.saturating_sub(k * step)).take_while(|&v| v > min).collect();
+    if min < 100 {
+        out.push(min);
+    }
+    out
+}
+
+/// 시험해 볼 설정 목록. 맨 앞이 가장 크고 뒤로 갈수록 작아진다: 화질(5씩) → FPS → 이미지 크기(5%씩), 각각 사용자가 정한 하한까지.
 /// 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값에서 시작한다: 화질 100, FPS는 제한·비슷한 장면 건너뛰기 없이
 /// 원래대로, 이미지 크기 100%. 바꾸면 안 되는 항목은 사용자가 정한 값 그대로다. 앞 단계에서 낮춘 값은 그대로 두고 다음 단계를 더한다.
 fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<ExportOptions> {
@@ -96,8 +110,8 @@ fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<Ex
     }
     let mut steps = vec![current.clone()];
     if fit.allow_quality {
-        for q in (50..=95).rev().step_by(5) {
-            current.quality = q;
+        for q in steps_down(5, u32::from(fit.min_quality)) {
+            current.quality = q as u8;
             steps.push(current.clone());
         }
     }
@@ -108,7 +122,10 @@ fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<Ex
         delays.get(delays.len() / 2).map_or(0, |d| (1000.0 / *d as f64).round() as u32)
     });
     if fit.allow_fps {
-        for fps in [50, 40, 30, 25, 20, 15, 12, 10] {
+        let min = fit.min_fps.max(1);
+        let mut list: Vec<u32> = [50, 40, 30, 25, 20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1].into_iter().filter(|&f| f > min).collect();
+        list.push(min);
+        for fps in list {
             if fps < cap {
                 current.limit_fps = Some(fps);
                 steps.push(current.clone());
@@ -116,13 +133,10 @@ fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<Ex
         }
     }
     if fit.allow_resize {
-        let base = u64::from(current.resize_percent);
-        for p in (50u64..=95).rev().step_by(5) {
-            let size = ((base * p + 50) / 100).max(1) as u32;
-            if size < current.resize_percent {
-                current.resize_percent = size;
-                steps.push(current.clone());
-            }
+        // 바꿔도 되면 시작은 늘 100%라서 단계 값이 곧 이미지 크기(%)
+        for size in steps_down(5, fit.min_resize) {
+            current.resize_percent = size;
+            steps.push(current.clone());
         }
     }
     steps
@@ -1344,7 +1358,26 @@ mod tests {
     }
 
     fn fit(target_bytes: u64) -> FitOptions {
-        FitOptions { target_bytes, allow_quality: true, allow_fps: true, allow_resize: true }
+        FitOptions { target_bytes, allow_quality: true, allow_fps: true, allow_resize: true, min_quality: 50, min_fps: 10, min_resize: 50 }
+    }
+
+    #[test]
+    fn fit_steps_stop_at_user_minimums() {
+        assert_eq!(steps_down(5, 25).last(), Some(&25));
+        assert_eq!(steps_down(5, 23).iter().rev().take(2).collect::<Vec<_>>(), vec![&23, &25]);
+        assert!(steps_down(5, 100).is_empty());
+        assert_eq!(steps_down(5, 0).last(), Some(&1));
+        let input = frames(10, 33);
+        let opt = opts(Format::Webp);
+        let low = FitOptions { min_quality: 23, min_fps: 7, min_resize: 25, ..fit(100) };
+        let steps = fit_ladder(&input, &opt, &low);
+        let last = steps.last().unwrap();
+        assert_eq!((last.quality, last.limit_fps, last.resize_percent), (23, Some(7), 25));
+        let fps: Vec<_> = steps.iter().filter_map(|s| s.limit_fps).collect::<std::collections::BTreeSet<_>>().into_iter().rev().collect();
+        assert_eq!(fps, vec![25, 20, 15, 12, 10, 8, 7]);
+        // 하한이 원래 값 이상이면 그 항목은 낮추지 않는다
+        let none_lower = FitOptions { min_quality: 100, min_fps: 60, min_resize: 100, ..fit(100) };
+        assert_eq!(fit_ladder(&input, &opt, &none_lower).len(), 1);
     }
 
     #[test]
