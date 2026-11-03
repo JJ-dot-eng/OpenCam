@@ -575,6 +575,8 @@ export default function Recorder() {
   const wide = barW >= 1080;
   const withHotkey = barW >= 760;
   const small = barW >= 560;
+  // 되돌리기 단추 글자는 조금 더 좁을 때까지 보여 준다 (작게 드래그한 영역에서도 알아보게)
+  const restoreText = barW >= 480;
   const presetValue = settings.sizePresets.findIndex(([w, h]) => w === hole.w && h === hole.h);
   const captureSize = fullMonitor ?? hole;
   // 틀에서 떼어 둔 툴바는 끌어도 창 전체가 움직이므로 끌기를 막는다
@@ -724,9 +726,9 @@ export default function Recorder() {
           </button>
         )}
         {(changed || mode !== "normal") && !recording && (
-          <button className={`rec-btn ${small ? "" : "icon"}`} onClick={resetFrame} title="녹화 틀을 기본 크기로 화면 가운데에 되돌리기">
+          <button className={`rec-btn restore ${restoreText ? "" : "icon"}`} onClick={resetFrame} title="녹화 틀을 기본 크기로 화면 가운데에 되돌리기">
             <IconArrowBackUp size={16} />
-            {small && "되돌리기"}
+            {restoreText && "되돌리기"}
           </button>
         )}
         {/* 가운데 칸: 자리가 모자라면 여기만 잘려서 오른쪽 닫기 버튼은 늘 보인다 */}
