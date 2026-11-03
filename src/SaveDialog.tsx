@@ -2,7 +2,21 @@
 
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, errText, ExportOptions, ExportResult, extOf, Format, FORMAT_EXT, formatBytes, FrameInfo, hexToRgb, Settings } from "./api";
+import {
+  api,
+  bgrToHex,
+  errText,
+  ExportOptions,
+  ExportResult,
+  extOf,
+  Format,
+  FORMAT_EXT,
+  formatBytes,
+  FrameInfo,
+  hexToBgr,
+  hexToRgb,
+  Settings,
+} from "./api";
 import { IconArrowBack, IconCircleDot, IconFolderOpen, IconTrash, IconX } from "@tabler/icons-react";
 import { Check, Modal } from "./dialogs";
 import { ColorInput, Field, NumInput, Section, Segmented, Slider } from "./Panel";
@@ -30,6 +44,26 @@ function defaultQuality(s: Settings, f: Format): number {
     avif: s.avifQuality,
   }[f];
 }
+
+/** 형식마다 따로 정하는 저장 옵션 (예전에는 설정 창의 형식 탭에 있었다) */
+const FORMAT_KEYS = [
+  "gifDither",
+  "gifRemoveSimilarPixels",
+  "gifFiniteLoop",
+  "gifLoopCount",
+  "webpMethod",
+  "webpLossless",
+  "webpIphoneCompat",
+  "webpFiniteLoop",
+  "webpLoopCount",
+  "apng256Colors",
+  "apngFiniteLoop",
+  "apngLoopCount",
+  "mp4ReplaceTransparent",
+  "transparentReplaceColor",
+] as const;
+type FormatOpts = Pick<Settings, (typeof FORMAT_KEYS)[number]>;
+type LoopKeys = ["gifFiniteLoop", "gifLoopCount"] | ["webpFiniteLoop", "webpLoopCount"] | ["apngFiniteLoop", "apngLoopCount"];
 
 interface Props {
   settings: Settings;
@@ -65,6 +99,11 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
   const [ffmpeg, setFfmpeg] = useState(true);
   // 특정 색 보호 (GIF): 이 색들은 팔레트에 그대로 남긴다
   const [protect, setProtect] = useState<string[]>([]);
+  const [fmt, setFmt] = useState<FormatOpts>(() => Object.fromEntries(FORMAT_KEYS.map((k) => [k, settings[k]])) as FormatOpts);
+  const setF = <K extends keyof FormatOpts>(k: K, v: FormatOpts[K]) => setFmt((c) => ({ ...c, [k]: v }));
+  // 저장·예상 크기 계산은 Rust가 가진 설정으로 하므로 형식별 옵션을 먼저 넣어 둔다.
+  // 단축키 등록이 실패해도 설정 자체는 저장되므로 그 오류는 넘긴다.
+  const applyFmt = () => api.setSettings({ ...settings, ...fmt }).catch(() => {});
 
   useEffect(() => {
     api.hasFfmpeg().then(setFfmpeg);
@@ -90,7 +129,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
   });
 
   // 옵션이 바뀌면 예상 크기는 더 이상 맞지 않으니 지우고, 계산 중이던 결과도 버린다
-  const optsKey = JSON.stringify(opts());
+  const optsKey = JSON.stringify([opts(), fmt]);
   const estimateRun = useRef(0);
   useEffect(() => {
     estimateRun.current++;
@@ -108,6 +147,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
     const run = ++estimateRun.current;
     setEstimate("계산 중…");
     try {
+      await applyFmt();
       const size = await api.estimateSize(opts());
       if (run === estimateRun.current) setEstimate(formatBytes(size));
     } catch (e) {
@@ -150,6 +190,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         }
       }
       const safeTarget = Math.max(1, Math.min(4000, Math.round(targetMb) || 1));
+      await applyFmt();
       const result = fitting
         ? await api.exportProjectFit(o, { targetBytes: safeTarget * 1_000_000, allowQuality, allowFps, allowResize }, target)
         : await api.exportProject(o, target);
@@ -170,6 +211,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
                   : {};
       await api.setSettings({
         ...settings,
+        ...fmt,
         ...q,
         fitBySize,
         fitTargetMb: safeTarget,
@@ -253,16 +295,58 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
     );
   }
 
+  // 반복: 무한 / 횟수 지정 (GIF·WebP·APNG)
+  const loopField = ([finite, count]: LoopKeys) => (
+    <Field label="반복">
+      <Segmented
+        label="반복"
+        value={fmt[finite] ? "n" : "inf"}
+        onChange={(v) => setF(finite, v === "n")}
+        options={[
+          ["inf", "무한 반복"],
+          ["n", "횟수 지정"],
+        ]}
+      />
+      {fmt[finite] && (
+        <NumInput
+          value={fmt[count]}
+          min={1}
+          max={65535}
+          unit="번"
+          label="재생 횟수"
+          disabled={working}
+          onChange={(v) => Number.isFinite(v) && setF(count, Math.max(1, Math.min(65535, Math.round(v))))}
+        />
+      )}
+    </Field>
+  );
+  const loopText = (finite: boolean, count: number) => (finite ? `${count}번 재생` : "무한 반복");
+  // 접혀 있을 때 보여 줄 지금 설정 요약
+  const extraSummary =
+    [
+      format === "gif" && loopText(fmt.gifFiniteLoop, fmt.gifLoopCount),
+      format === "gif" && fmt.gifDither && "디더링",
+      format === "gif" && protect.length > 0 && `보호 색 ${protect.length}개`,
+      format === "webp" && loopText(fmt.webpFiniteLoop, fmt.webpLoopCount),
+      format === "webp" && (fmt.webpLossless ? "무손실" : `압축 ${fmt.webpMethod}`),
+      format === "apng" && (fmt.apng256Colors ? "256색" : "24비트"),
+      format === "apng" && loopText(fmt.apngFiniteLoop, fmt.apngLoopCount),
+      format === "mp4" && fmt.mp4ReplaceTransparent && "투명 부분 색 바꿈",
+      progressBar && "진행 막대",
+    ]
+      .filter(Boolean)
+      .join(" · ") || "기본값";
+
   const width = frames[0]?.width ?? 0;
   const height = frames[0]?.height ?? 0;
   const outW = Math.max(1, Math.floor((width * (resize || 100)) / 100));
   const outH = Math.max(1, Math.floor((height * (resize || 100)) / 100));
 
   return (
-    <Modal title="저장" onClose={() => !working && onClose()} className="save-modal">
-      <div className="save-grid">
+    <Modal title="저장" onClose={() => !working && onClose()} className="pane-modal">
+      <div className="pane-grid">
         {/* 왼쪽: 형식 목록 (한 줄 설명으로 무엇을 고를지 돕는다) */}
-        <div className="save-formats" role="radiogroup" aria-label="저장 형식">
+        <div className="pane-nav" role="radiogroup" aria-label="저장 형식">
           {FORMATS.map(([f, label, desc]) => {
             const noFfmpeg = (f === "mp4" || f === "webm" || f === "avif") && !ffmpeg;
             return (
@@ -282,8 +366,8 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         </div>
 
         {/* 오른쪽: 고른 형식의 설정 (길면 이 부분만 스크롤) + 늘 보이는 결과 요약 */}
-        <div className="save-right">
-          <div className="save-settings">
+        <div className="pane-right">
+          <div className="pane-body">
             {needsFfmpeg && !ffmpeg && (
               <p className="error save-note">ffmpeg.exe를 찾지 못했습니다. ffmpeg를 설치하거나 OpenCam 폴더에 넣어 주세요.</p>
             )}
@@ -364,7 +448,68 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
               </Field>
             </Section>
 
-            <Section title="추가 옵션">
+            <Section title="추가 옵션" collapsible defaultOpen={false} summary={extraSummary}>
+              {format === "gif" && (
+                <>
+                  {loopField(["gifFiniteLoop", "gifLoopCount"])}
+                  <Field label="디더링">
+                    <Check label="색 띠를 점으로 섞기 (조금 커짐)" checked={fmt.gifDither} onChange={(v) => setF("gifDither", v)} disabled={working} />
+                  </Field>
+                  <Field label="비슷한 픽셀">
+                    <Check label="합치기 (작아짐)" checked={fmt.gifRemoveSimilarPixels} onChange={(v) => setF("gifRemoveSimilarPixels", v)} disabled={working} />
+                  </Field>
+                </>
+              )}
+              {format === "webp" && (
+                <>
+                  {loopField(["webpFiniteLoop", "webpLoopCount"])}
+                  <Field label="압축 방식">
+                    <NumInput
+                      value={fmt.webpMethod}
+                      min={0}
+                      max={6}
+                      label="압축 방식"
+                      narrow
+                      disabled={working}
+                      onChange={(v) => Number.isFinite(v) && setF("webpMethod", Math.max(0, Math.min(6, Math.round(v))))}
+                    />
+                    <span className="hint">0 빠름 ~ 6 작게</span>
+                  </Field>
+                  <Field label="무손실">
+                    <Check label="색을 전혀 잃지 않기 (커짐)" checked={fmt.webpLossless} onChange={(v) => setF("webpLossless", v)} disabled={working} />
+                  </Field>
+                  <Field label="아이폰">
+                    <Check label="아이폰 호환 (프레임을 통째로)" checked={fmt.webpIphoneCompat} onChange={(v) => setF("webpIphoneCompat", v)} disabled={working} />
+                  </Field>
+                </>
+              )}
+              {format === "apng" && (
+                <>
+                  <Field label="색">
+                    <Segmented
+                      label="APNG 색"
+                      value={fmt.apng256Colors ? "256" : "24"}
+                      onChange={(v) => setF("apng256Colors", v === "256")}
+                      options={[
+                        ["256", "256색 (작게)"],
+                        ["24", "24비트 (색 그대로)"],
+                      ]}
+                    />
+                  </Field>
+                  {loopField(["apngFiniteLoop", "apngLoopCount"])}
+                </>
+              )}
+              {format === "mp4" && (
+                <Field label="투명 부분">
+                  <Check label="이 색으로" checked={fmt.mp4ReplaceTransparent} onChange={(v) => setF("mp4ReplaceTransparent", v)} disabled={working} />
+                  <ColorInput
+                    label="투명 부분 색"
+                    value={bgrToHex(fmt.transparentReplaceColor)}
+                    disabled={!fmt.mp4ReplaceTransparent || working}
+                    onChange={(v) => setF("transparentReplaceColor", hexToBgr(v))}
+                  />
+                </Field>
+              )}
               <Field label="진행 막대">
                 <Check label="재생 진행 막대 넣기" checked={progressBar} onChange={setProgressBar} disabled={working} />
               </Field>
@@ -418,7 +563,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         </div>
       </div>
 
-      <div className="save-foot">
+      <div className="pane-foot">
         {working && progress && (
           <div className="progress">
             <div className="bar" style={{ width: `${Math.round(progress.p * 100)}%` }} />
@@ -428,7 +573,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
           </div>
         )}
         {error && <p className="error">{error}</p>}
-        <div className="save-foot-row">
+        <div className="pane-foot-row">
           <input className="path" aria-label="저장할 파일" value={path} onChange={(e) => setPath(e.target.value)} disabled={working} />
           <button
             disabled={working}
