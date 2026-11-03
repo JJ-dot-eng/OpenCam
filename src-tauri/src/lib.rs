@@ -108,7 +108,8 @@ fn capture_rect(app: &AppHandle) -> CmdResult<Rect> {
 /// 창에 구멍을 뚫는다. 구멍 부분은 마우스 클릭도 아래 창으로 그대로 넘어간다.
 #[cfg(windows)]
 /// keep: 창에서 남길 부분(툴바, 틀). 비어 있으면 창 전체를 남긴다.
-fn apply_hole(w: &WebviewWindow, hole: Rect, keep: &[Rect]) -> CmdResult<()> {
+/// above: 구멍 위에 겹쳐도 남길 부분 (녹화 영역 위에 띄운 툴바).
+fn apply_hole(w: &WebviewWindow, hole: Rect, keep: &[Rect], above: &[Rect]) -> CmdResult<()> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, RGN_OR, SetWindowRgn};
     let hwnd = HWND(w.hwnd().map_err(err)?.0);
@@ -132,6 +133,11 @@ fn apply_hole(w: &WebviewWindow, hole: Rect, keep: &[Rect]) -> CmdResult<()> {
         let hole_rgn = CreateRectRgn(ox + hole.x, oy + hole.y, ox + hole.x + hole.w, oy + hole.y + hole.h);
         CombineRgn(Some(all), Some(all), Some(hole_rgn), RGN_DIFF);
         let _ = DeleteObject(hole_rgn.into());
+        for r in above {
+            let part = CreateRectRgn(ox + r.x, oy + r.y, ox + r.x + r.w, oy + r.y + r.h);
+            CombineRgn(Some(all), Some(all), Some(part), RGN_OR);
+            let _ = DeleteObject(part.into());
+        }
         // 성공하면 영역은 시스템 것이 되므로 지우지 않는다
         if SetWindowRgn(hwnd, Some(all), true) == 0 {
             let _ = DeleteObject(all.into());
@@ -149,10 +155,11 @@ fn set_hole(
     w: i32,
     h: i32,
     keep: Option<Vec<Rect>>,
+    above: Option<Vec<Rect>>,
 ) -> CmdResult<()> {
     let hole = Rect { x, y, w: w.max(1), h: h.max(1) };
     *state.hole.lock() = hole;
-    apply_hole(&recorder_window(&app)?, hole, &keep.unwrap_or_default())
+    apply_hole(&recorder_window(&app)?, hole, &keep.unwrap_or_default(), &above.unwrap_or_default())
 }
 
 #[tauri::command]
@@ -212,6 +219,28 @@ fn set_full_capture(app: AppHandle, window: WebviewWindow, state: State<AppState
         }
     }
     *state.full_capture.lock() = monitor;
+    Ok(())
+}
+
+/// 녹화 틀 창을 캡처에서 빼거나 다시 넣는다. 창에 맞추기에서 툴바가 녹화 영역 위에 떠 있을 때
+/// 툴바가 같이 찍히지 않게 쓴다. 전체 화면은 set_full_capture가 따로 맡는다.
+#[tauri::command]
+fn set_capture_excluded(app: AppHandle, window: WebviewWindow, state: State<AppState>, excluded: bool) -> CmdResult<()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowDisplayAffinity, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+    if window.label() != "recorder" { return Err("녹화 창에서만 사용할 수 있습니다".into()); }
+    if state.recorder.lock().is_some() { return Err("녹화 중에는 바꿀 수 없습니다".into()); }
+    if state.full_capture.lock().is_some() { return Ok(()); }
+    let hwnd = HWND(recorder_window(&app)?.hwnd().map_err(err)?.0);
+    let affinity = if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    unsafe {
+        SetWindowDisplayAffinity(hwnd, affinity).map_err(err)?;
+        let mut actual = 0u32;
+        GetWindowDisplayAffinity(hwnd, &mut actual).map_err(|e| format!("캡처 제외 상태 확인 실패: {e}"))?;
+        if actual != affinity.0 {
+            return Err("이 Windows에서는 녹화 틀을 캡처에서 제외할 수 없습니다".into());
+        }
+    }
     Ok(())
 }
 
@@ -1928,6 +1957,7 @@ pub fn run() {
             recovery_discard,
             get_full_capture,
             set_full_capture,
+            set_capture_excluded,
             capture_windows,
             capture_window_bounds,
             begin_area_selection,

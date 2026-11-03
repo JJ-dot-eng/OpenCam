@@ -364,7 +364,7 @@ export type EditOp =
 
 export const api = {
   /** 녹화 틀 창에 구멍을 뚫는다. keep: 창에서 남길 부분(툴바·틀) */
-  setHole: (r: Rect, keep: Rect[]) => invoke<void>("set_hole", { ...r, keep }),
+  setHole: (r: Rect, keep: Rect[], above: Rect[] = []) => invoke<void>("set_hole", { ...r, keep, above }),
   monitors: () => invoke<Rect[]>("monitors"),
   resizeMouseDown: () => invoke<boolean>("resize_mouse_down"),
   /** 크기 조절 중 돋보기. 마우스 버튼을 떼면 스스로 닫힌다. */
@@ -373,6 +373,8 @@ export const api = {
   takeStartupNotice: () => invoke<string | null>("take_startup_notice"),
   getFullCapture: () => invoke<Rect | null>("get_full_capture"),
   setFullCapture: (monitor: Rect | null) => invoke<void>("set_full_capture", { monitor }),
+  /** 녹화 틀 창을 캡처에서 뺀다 (툴바를 녹화 영역 위에 띄울 때) */
+  setCaptureExcluded: (excluded: boolean) => invoke<void>("set_capture_excluded", { excluded }),
   captureWindows: () => invoke<CaptureWindow[]>("capture_windows"),
   captureWindowBounds: (id: string, pid: number) => invoke<{ rect: Rect; activated: boolean }>("capture_window_bounds", { id, pid }),
   beginAreaSelection: () => invoke<void>("begin_area_selection"),
