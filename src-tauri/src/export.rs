@@ -76,6 +76,7 @@ pub struct FitOptions {
 #[serde(rename_all = "camelCase")]
 pub struct FitInfo {
     pub quality: u8,
+    /// FPS를 제한했으면 실제로 나오는 FPS (제한 값이 아니라 프레임을 합친 결과)
     pub limit_fps: Option<u32>,
     pub resize_percent: u32,
     pub fitted: bool,
@@ -83,12 +84,13 @@ pub struct FitInfo {
 }
 
 /// 용량에 맞추기 단계 수. 0단계는 가장 큰 설정, 마지막 단계는 모두 최소값
-const FIT_LEVELS: u32 = 30;
+const FIT_LEVELS: u32 = 60;
 
 /// 시험해 볼 설정 목록. 맨 앞이 가장 크고 뒤로 갈수록 작아진다. 바꿔도 되는 항목을 모두 같은 비율로 함께 낮춘다
 /// (한 가지만 끝까지 낮추면 화질만 뭉개지고 크기는 그대로인 결과가 나오기 쉬워서).
 /// 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값에서 시작해 사용자가 정한 최소값까지 간다:
-/// 화질 100 → 최소, 이미지 크기 100% → 최소, FPS는 제한·비슷한 장면 건너뛰기 없이 원래대로 → 최소(같은 배율로 줄도록 비율로).
+/// 화질 100 → 최소, 이미지 크기 100% → 최소, FPS는 제한·비슷한 장면 건너뛰기 없이 원래대로 → 최소.
+/// FPS는 프레임을 합쳐 줄이므로 원래의 1/2, 1/3…만 나온다. 같은 배율로 줄인 값에 가장 가까운 것을 고른다.
 /// 바꾸면 안 되는 항목은 사용자가 정한 값 그대로다. 앞 단계와 같은 설정은 빼므로 모든 항목이 뒤로 갈수록 같거나 작다.
 fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<ExportOptions> {
     let mut base = opt.clone();
@@ -97,13 +99,14 @@ fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<Ex
         base.skip_similar = None;
         base.skip_similar_time_limit_ms = None;
     }
-    // 원래 FPS: 프레임 시간의 가운데 값으로 셈
-    let mut delays: Vec<u32> = frames.iter().map(|f| f.delay_ms.max(1)).collect();
-    delays.sort_unstable();
-    let cap = delays.get(delays.len() / 2).map_or(0, |d| (1000.0 / *d as f64).round() as u32);
+    // 원래 FPS: 프레임 시간의 가운데 값으로 셈. FPS 제한은 프레임을 n장씩 합쳐 지키므로 원래 FPS의 1/n만 나온다
+    let d = median_delay(frames);
+    let cap = 1000.0 / f64::from(d);
     let min_q = f64::from(fit.min_quality.clamp(1, 100));
     let min_r = f64::from(fit.min_resize.clamp(1, 100));
     let min_fps = f64::from(fit.min_fps.max(1));
+    // 최소 FPS를 지키면서 합칠 수 있는 가장 많은 장 수
+    let max_n = ((cap / min_fps).floor() as u32).max(1);
 
     let mut steps: Vec<ExportOptions> = vec![];
     for k in 0..=FIT_LEVELS {
@@ -115,9 +118,11 @@ fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<Ex
         if fit.allow_resize {
             step.resize_percent = (100.0 - t * (100.0 - min_r)).round() as u32;
         }
-        if fit.allow_fps && (cap as f64) > min_fps {
-            let fps = ((cap as f64) * (min_fps / cap as f64).powf(t)).round().max(min_fps) as u32;
-            step.limit_fps = (fps < cap).then_some(fps);
+        if fit.allow_fps && max_n > 1 {
+            // 원래 FPS에서 최소 FPS까지 같은 배율로 줄인 값에 가장 가까운, 실제로 나오는 FPS(1/n)를 고른다
+            let want = cap * (min_fps / cap).powf(t);
+            let n = ((cap / want).round() as u32).clamp(1, max_n);
+            step.limit_fps = (n > 1).then(|| limit_for_merge(d, n));
         }
         let same = steps.last().is_some_and(|p: &ExportOptions| {
             (p.quality, p.limit_fps, p.resize_percent) == (step.quality, step.limit_fps, step.resize_percent)
@@ -129,16 +134,80 @@ fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<Ex
     steps
 }
 
-/// 진행 표시용 설정 설명: "화질 70, 15 FPS, 크기 90%"
-fn fit_step_text(step: &ExportOptions) -> String {
-    let fps = step.limit_fps.map_or("FPS 그대로".to_string(), |v| format!("{v} FPS"));
+/// 프레임 시간의 가운데 값(ms)
+fn median_delay(frames: &[Frame]) -> u32 {
+    let mut delays: Vec<u32> = frames.iter().map(|f| f.delay_ms.max(1)).collect();
+    delays.sort_unstable();
+    delays.get(delays.len() / 2).copied().unwrap_or(100)
+}
+
+/// 프레임 시간이 d ms인 녹화에서 n장씩 합쳐지게 하는 FPS 제한 값 (`prepare`는 1000/제한 ms가 찰 때까지 합친다)
+fn limit_for_merge(d: u32, n: u32) -> u32 {
+    1000u32.div_ceil(d.max(1) * n.max(1)).max(1)
+}
+
+/// FPS 제한 값을 주면 프레임 시간이 d ms인 녹화에서 실제로 나오는 FPS
+fn actual_fps(d: u32, limit: u32) -> u32 {
+    let n = (1000 / limit.max(1)).div_ceil(d.max(1)).max(1);
+    (1000.0 / f64::from(d.max(1) * n)).round() as u32
+}
+
+/// 진행 표시용 설정 설명: "화질 70, 15 FPS, 크기 90%". FPS는 제한 값이 아니라 실제로 나오는 값 (d는 프레임 시간 가운데 값)
+fn fit_step_text(step: &ExportOptions, d: u32) -> String {
+    let fps = step.limit_fps.map_or("FPS 그대로".to_string(), |v| format!("{} FPS", actual_fps(d, v)));
     format!("화질 {}, {fps}, 크기 {}%", step.quality, step.resize_percent)
+}
+
+/// 실제로 저장해 본 크기로 다음에 저장해 볼 단계를 고른다. 그만해도 되면 None.
+/// 단계가 하나 바뀔 때 파일 크기가 몇 배가 되는지를 실제 저장 두 번(없으면 예상 크기들)으로 어림해서,
+/// 목표의 95%에 닿을 단계로 한 번에 건너뛴다. 목표를 넘은 단계와 목표 안에 든 단계 사이에서만 고른다.
+/// probes는 예상해 본 (단계, 예상 크기), real은 실제로 저장해 본 (단계, 크기)다.
+fn next_fit_index(len: usize, target: u64, probes: &[(usize, f64)], real: &[(usize, u64)]) -> Option<usize> {
+    // 목표 안에 든 가장 큰 설정(번호가 작은 것)과 목표를 넘은 가장 작은 설정(번호가 큰 것)
+    let best = real.iter().filter(|r| r.1 <= target).min_by_key(|r| r.0).copied();
+    let over = real.iter().filter(|r| r.1 > target).max_by_key(|r| r.0).copied();
+    let lo = over.map_or(0, |o| o.0 + 1);
+    let (anchor, hi) = match best {
+        // 목표의 90% 넘게 찼으면 충분하다
+        Some(b) if u128::from(b.1) * 100 >= u128::from(target) * 90 => return None,
+        Some(b) => (b, b.0.checked_sub(1)?),
+        None => (over?, len.checked_sub(1)?),
+    };
+    if lo > hi {
+        return None;
+    }
+    let ln = |v: f64| v.max(1.0).ln();
+    // 단계 하나에 ln(크기)가 얼마나 줄어드나 (음수). 실제 저장 중 기준과 가장 가까운 것, 없으면 예상 크기들로
+    let from_real = real
+        .iter()
+        .filter(|r| r.0 != anchor.0)
+        .min_by_key(|r| r.0.abs_diff(anchor.0))
+        .map(|r| (ln(r.1 as f64) - ln(anchor.1 as f64)) / (r.0 as f64 - anchor.0 as f64));
+    let from_probes = || {
+        let n = probes.len() as f64;
+        let (sx, sy) = probes.iter().fold((0.0, 0.0), |(sx, sy), p| (sx + p.0 as f64, sy + ln(p.1)));
+        let (mx, my) = (sx / n, sy / n);
+        let (cov, var) = probes.iter().fold((0.0, 0.0), |(c, v), p| {
+            let dx = p.0 as f64 - mx;
+            (c + dx * (ln(p.1) - my), v + dx * dx)
+        });
+        (var > 0.0).then(|| cov / var)
+    };
+    let slope = from_real.filter(|s| *s < 0.0).or_else(|| from_probes().filter(|s| *s < 0.0));
+    let aim = target as f64 * 0.95;
+    let guess = match slope {
+        Some(sl) => (anchor.0 as f64 + (ln(aim) - ln(anchor.1 as f64)) / sl).ceil(),
+        // 어림할 수 없으면 한 단계씩
+        None if best.is_some() => anchor.0 as f64 - 1.0,
+        None => anchor.0 as f64 + 1.0,
+    };
+    Some((guess.max(lo as f64) as usize).clamp(lo, hi))
 }
 
 /// 목표 크기 안에 들어오도록 설정을 낮춰 저장한다 (GIF·WebP만).
 /// 먼저 녹화의 일부(고르게 뽑은 5구간, 약 1/5)만 저장해 보고 길이 비율로 전체 크기를 짐작해서,
-/// 목표의 95% 안에 드는 가장 덜 낮춘 설정을 반씩 좁혀 찾는다. 그 설정으로 실제로 저장해 보고
-/// 목표를 넘으면 한 단계 더 낮추고, 목표의 80%도 안 되면 한 단계 높여 본다(전체 저장은 최대 4번).
+/// 목표의 95% 안에 드는 가장 덜 낮춘 설정을 반씩 좁혀 찾는다. 그 설정으로 실제로 저장해 보고,
+/// 목표를 넘거나 목표의 90%도 안 되면 실제 크기로 몇 단계를 옮길지 어림해 한 번에 건너뛴다(`next_fit_index`, 전체 저장은 최대 4번).
 /// 목표 안에 든 것 중 가장 큰 설정을 남기고, 끝까지 넘으면 가장 작게 해 본 결과를 저장한다.
 /// 저장은 임시 폴더에 한 뒤 옮기므로, 중간에 실패해도 원래 있던 파일은 그대로다.
 pub fn export_fit(
@@ -156,6 +225,7 @@ pub fn export_fit(
         bail!("저장할 프레임이 없습니다");
     }
     let steps = fit_ladder(frames, opt, fit);
+    let d = median_delay(frames);
     let whole = frames.len() <= 40;
     // 구간마다 따로 저장해 크기를 더한다. WebP 인코더는 한 번에 코어 하나만 쓰므로 구간을 나란히 돌리면 빠르다.
     let segments: Vec<&[Frame]> = if whole {
@@ -174,26 +244,48 @@ pub fn export_fit(
     let sample_ms: u128 = segments.iter().map(|seg| duration(seg)).sum();
     let aim = u128::from(fit.target_bytes) * 95 / 100;
 
-    // 짐작은 진행률 0~50%. 반씩 좁히므로 대략 log2(단계 수)번 한다.
-    let rounds = (steps.len() as f32).log2().ceil().max(1.0);
-    let (mut low, mut high, mut tries) = (0usize, steps.len(), 0usize);
-    while low < high {
-        let mid = (low + high) / 2;
-        let step = &steps[mid];
-        progress((tries as f32 / rounds * 0.5).min(0.49), "예상 크기 계산 중");
-        let sizes = segments.par_iter().map(|seg| estimate_size(seg, step, s)).collect::<Result<Vec<_>>>()?;
-        let size: u128 = sizes.into_iter().map(u128::from).sum();
-        let estimate = if whole || sample_ms == 0 { size } else { size.saturating_mul(total_ms) / sample_ms };
-        tries += 1;
-        let msg = format!("{tries}번째 예상 - {} → 예상 {:.1}MB", fit_step_text(step), estimate as f64 / 1_000_000.0);
-        progress((tries as f32 / rounds * 0.5).min(0.5), &msg);
-        if estimate <= aim {
-            high = mid;
-        } else {
-            low = mid + 1;
+    // 짐작은 진행률 0~50%. 반씩 좁히므로 한 번 찾을 때 대략 log2(단계 수)번 한다 (FPS를 바꾸면 두 번 찾는다).
+    let refine = fit.allow_fps && (fit.allow_quality || fit.allow_resize);
+    let rounds = (steps.len() as f32).log2().ceil().max(1.0) * if refine { 2.0 } else { 1.0 };
+    let mut tries = 0usize;
+    // 목표의 95% 안에 드는 가장 큰 단계를 반씩 좁혀 찾는다. 예상해 본 (단계, 예상 크기)도 돌려준다
+    let mut search = |steps: &[ExportOptions]| -> Result<(usize, Vec<(usize, f64)>)> {
+        let (mut low, mut high) = (0usize, steps.len());
+        let mut probes: Vec<(usize, f64)> = vec![];
+        while low < high {
+            let mid = (low + high) / 2;
+            let step = &steps[mid];
+            progress((tries as f32 / rounds * 0.5).min(0.49), "예상 크기 계산 중");
+            let sizes = segments.par_iter().map(|seg| estimate_size(seg, step, s)).collect::<Result<Vec<_>>>()?;
+            let size: u128 = sizes.into_iter().map(u128::from).sum();
+            let estimate = if whole || sample_ms == 0 { size } else { size.saturating_mul(total_ms) / sample_ms };
+            tries += 1;
+            probes.push((mid, estimate as f64));
+            let msg = format!("{tries}번째 예상 - {} → 예상 {:.1}MB", fit_step_text(step, d), estimate as f64 / 1_000_000.0);
+            progress((tries as f32 / rounds * 0.49).min(0.49), &msg);
+            if estimate <= aim {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
         }
-    }
-    let mut index = low.min(steps.len() - 1);
+        Ok((low.min(steps.len() - 1), probes))
+    };
+    let (found, probes) = search(&steps)?;
+    // FPS는 원래의 1/2, 1/3…로만 줄어서 한 단계에 크기가 뚝 떨어질 수 있다. FPS를 줄였으면 그 FPS로 고정하고
+    // 화질·크기를 처음부터 다시 찾아, 떨어진 만큼 화질·크기를 되올린다.
+    let (steps, mut index, probes) = match steps[found].limit_fps {
+        Some(limit) if refine => {
+            let mut fixed = opt.clone();
+            fixed.limit_fps = Some(limit);
+            fixed.skip_similar = None;
+            fixed.skip_similar_time_limit_ms = None;
+            let sub = fit_ladder(frames, &fixed, &FitOptions { allow_fps: false, ..fit.clone() });
+            let (i, p) = search(&sub)?;
+            (sub, i, p)
+        }
+        _ => (steps, found, probes),
+    };
 
     static NEXT_FIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = loop {
@@ -207,42 +299,28 @@ pub fn export_fit(
     };
     // 실제 저장은 진행률 50~100%, 한 번에 12.5%씩
     let result = (|| -> Result<(Vec<PathBuf>, FitInfo)> {
-        // 목표 안에 든 것 중 가장 큰 설정(번호가 작은 것)과, 목표를 넘은 것 중 가장 작은 설정(번호가 큰 것)
-        let mut best: Option<(usize, PathBuf)> = None;
-        let mut over: Option<(usize, PathBuf)> = None;
+        // 실제로 저장해 본 (단계, 크기)와 그 임시 파일
+        let mut real: Vec<(usize, u64)> = vec![];
+        let mut temps: Vec<PathBuf> = vec![];
         for attempt in 0..4 {
             let step = &steps[index];
             let temp = dir.join(format!("fit{attempt}.{}", opt.format.ext()));
-            let message = format!("{}번째 저장 - {}", attempt + 1, fit_step_text(step));
+            let message = format!("{}번째 저장 - {}", attempt + 1, fit_step_text(step, d));
             let base = 0.5 + attempt as f32 * 0.125;
             export(frames, &temp, step, s, &|p, _| progress(base + p.clamp(0.0, 1.0) * 0.125, &message))?;
-            let size = std::fs::metadata(&temp)?.len();
-            if size <= fit.target_bytes {
-                if best.as_ref().is_none_or(|b| index < b.0) {
-                    best = Some((index, temp));
-                }
-                // 목표보다 한참 작으면 한 단계 큰 설정도 해 본다 (그 설정이 넘는다는 걸 이미 알면 빼고)
-                let far_under = u128::from(size) * 100 < u128::from(fit.target_bytes) * 80;
-                if far_under && index > 0 && over.as_ref().is_none_or(|o| o.0 < index - 1) {
-                    index -= 1;
-                    continue;
-                }
-                break;
+            real.push((index, std::fs::metadata(&temp)?.len()));
+            temps.push(temp);
+            match next_fit_index(steps.len(), fit.target_bytes, &probes, &real) {
+                Some(next) => index = next,
+                None => break,
             }
-            if over.as_ref().is_none_or(|o| index > o.0) {
-                over = Some((index, temp));
-            }
-            // 넘었는데 이미 목표 안에 든 결과가 있거나, 더 낮출 단계가 없으면 그만
-            if best.is_some() || index + 1 == steps.len() {
-                break;
-            }
-            index += 1;
         }
-        let (index, temp, fitted) = match (best, over) {
-            (Some((i, t)), _) => (i, t, true),
-            (None, Some((i, t))) => (i, t, false),
-            (None, None) => bail!("저장한 결과가 없습니다"),
-        };
+        // 목표 안에 든 것 중 가장 큰 설정(번호가 작은 것), 없으면 넘은 것 중 가장 작은 설정(번호가 큰 것)
+        let fits = |k: &usize| real[*k].1 <= fit.target_bytes;
+        let pick = (0..real.len()).filter(fits).min_by_key(|&k| real[k].0).map(|k| (k, true));
+        let pick = pick.or_else(|| (0..real.len()).max_by_key(|&k| real[k].0).map(|k| (k, false)));
+        let Some((k, fitted)) = pick else { bail!("저장한 결과가 없습니다") };
+        let (index, temp) = (real[k].0, temps[k].clone());
         let step = &steps[index];
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
@@ -255,7 +333,7 @@ pub fn export_fit(
         progress(1.0, "저장 완료");
         let info = FitInfo {
             quality: step.quality,
-            limit_fps: step.limit_fps,
+            limit_fps: step.limit_fps.map(|l| actual_fps(d, l)),
             resize_percent: step.resize_percent,
             fitted,
             target_bytes: fit.target_bytes,
@@ -1349,13 +1427,28 @@ mod tests {
     }
 
     #[test]
+    fn fit_fps_limits_merge_exactly_n_frames() {
+        // FPS 제한은 프레임을 합쳐 지키므로, 고른 제한 값이 정말 n장씩 합치는지 실제 가공으로 본다
+        let s = Settings::default();
+        for d in [16u32, 20, 33, 40, 50, 100] {
+            let input = frames(60, d);
+            for n in 2..=4 {
+                let mut o = opts(Format::Webp);
+                o.limit_fps = Some(limit_for_merge(d, n));
+                assert_eq!(prepare(&input, &o, &s).len(), 60usize.div_ceil(n as usize), "프레임 {d}ms, {n}장씩");
+                assert_eq!(actual_fps(d, limit_for_merge(d, n)), (1000.0 / f64::from(d * n)).round() as u32);
+            }
+        }
+    }
+
+    #[test]
     fn fit_steps_stop_at_user_minimums() {
         let input = frames(10, 33);
         let opt = opts(Format::Webp);
         let low = FitOptions { min_quality: 23, min_fps: 7, min_resize: 25, ..fit(100) };
         let steps = fit_ladder(&input, &opt, &low);
         let last = steps.last().unwrap();
-        assert_eq!((last.quality, last.limit_fps, last.resize_percent), (23, Some(7), 25));
+        assert_eq!((last.quality, last.limit_fps, last.resize_percent), (23, Some(8), 25));
         assert!(steps.iter().all(|s| s.quality >= 23 && s.resize_percent >= 25 && s.limit_fps.is_none_or(|f| f >= 7)));
         // 하한이 원래 값 이상이면 그 항목은 낮추지 않는다
         let none_lower = FitOptions { min_quality: 100, min_fps: 60, min_resize: 100, ..fit(100) };
@@ -1372,14 +1465,14 @@ mod tests {
         opt.resize_percent = 60;
         // 바꿔도 되는 항목은 사용자가 정한 값을 무시하고 가장 큰 값(화질 100, 원래 30 FPS, 100%)부터
         let steps = fit_ladder(&input, &opt, &fit(100));
-        assert_eq!(steps.len(), 31);
+        // 같은 설정은 빼므로 61개 이하, 그래도 잘게 나뉜다
+        assert!(steps.len() > 40 && steps.len() <= 61);
         let first = &steps[0];
         assert_eq!((first.quality, first.limit_fps, first.skip_similar, first.resize_percent), (100, None, None, 100));
-        // 셋을 함께 같은 비율로 낮춘다: 가운데 단계는 화질·크기 75, FPS는 30과 10의 비율 가운데(약 17)
-        let mid = &steps[15];
-        assert_eq!((mid.quality, mid.limit_fps, mid.resize_percent), (75, Some(17), 75));
-        let last = &steps[30];
-        assert_eq!((last.quality, last.limit_fps, last.resize_percent), (50, Some(10), 50));
+        // 셋을 함께 같은 비율로 낮춘다: 가운데 단계는 화질·크기 75, FPS는 30과 10의 비율 가운데(약 17)에 가장 가까운 실제 FPS인 15(제한 16)
+        assert!(steps.iter().any(|s| (s.quality, s.limit_fps, s.resize_percent) == (75, Some(16), 75)));
+        let last = steps.last().unwrap();
+        assert_eq!((last.quality, last.limit_fps, last.resize_percent), (50, Some(11), 50));
         // 뒤로 갈수록 모든 항목이 같거나 작다
         let fps = |s: &ExportOptions| s.limit_fps.unwrap_or(30);
         assert!(steps.windows(2).all(|w| w[1].quality <= w[0].quality && w[1].resize_percent <= w[0].resize_percent && fps(&w[1]) <= fps(&w[0])));
@@ -1391,9 +1484,30 @@ mod tests {
         assert_eq!((only[0].quality, only[0].limit_fps, only[0].skip_similar, only[0].resize_percent), (85, Some(15), Some(5), 60));
         let resize_only = fit_ladder(&input, &opt, &FitOptions { allow_resize: true, ..none });
         assert_eq!((resize_only[0].quality, resize_only[0].limit_fps, resize_only[0].resize_percent), (85, Some(15), 100));
-        assert_eq!(resize_only.len(), 31);
+        // 크기만 바뀌므로 100~50%의 서로 다른 값 51개
+        assert_eq!(resize_only.len(), 51);
         assert!(resize_only.iter().all(|s| s.quality == 85 && s.limit_fps == Some(15)));
         assert_eq!(resize_only.last().unwrap().resize_percent, 50);
+    }
+
+    #[test]
+    fn fit_jumps_several_steps_from_real_size() {
+        // 예상 크기: 단계 하나에 약 12%씩 작아진다
+        let probes = [(5, 200.0), (10, 110.0), (15, 60.0)];
+        // 목표(100)를 20% 넘으면 한 칸이 아니라 목표의 95%에 닿을 만큼(2칸) 건너뛴다
+        assert_eq!(next_fit_index(30, 100, &probes, &[(10, 120)]), Some(12));
+        // 목표의 절반이면 위로 여러 칸
+        assert_eq!(next_fit_index(30, 100, &probes, &[(10, 50)]), Some(5));
+        // 목표의 90% 넘게 찼으면 그만
+        assert_eq!(next_fit_index(30, 100, &probes, &[(10, 92)]), None);
+        // 넘은 단계와 든 단계 사이에서만 고르고, 실제 저장 두 번의 비율을 쓴다
+        assert_eq!(next_fit_index(30, 100, &probes, &[(10, 120), (12, 80)]), Some(11));
+        assert_eq!(next_fit_index(30, 100, &probes, &[(10, 120), (11, 85)]), None);
+        // 마지막 단계도 넘었으면 더 할 게 없다
+        assert_eq!(next_fit_index(20, 100, &probes, &[(19, 120)]), None);
+        // 어림할 자료가 없으면 한 칸씩
+        assert_eq!(next_fit_index(20, 100, &[], &[(3, 120)]), Some(4));
+        assert_eq!(next_fit_index(20, 100, &[], &[(3, 50)]), Some(2));
     }
 
     #[test]
