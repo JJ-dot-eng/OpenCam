@@ -605,6 +605,44 @@ input[type="range"] {
   pointer-events: none;
 }
 
+/* 썸네일 줄을 감싼다 (축소 보기 표시를 오른쪽 위에 띄우려고) */
+.strip-wrap {
+  flex: none;
+  position: relative;
+}
+
+/* 축소 보기: 칸마다 그 자리 프레임 하나, 선택과 지금 프레임은 위에 칠한다 */
+.strip-item.compact {
+  overflow: hidden;
+}
+
+.strip-selrun {
+  position: absolute;
+  box-sizing: border-box;
+  border-bottom: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  pointer-events: none;
+}
+
+.strip-curline {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+/* 썸네일 그림 위 오른쪽 위 (아래쪽 번호·시간을 가리지 않게) */
+.strip-zoom {
+  position: absolute;
+  right: 8px;
+  bottom: 52px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 10px;
+  opacity: 0.9;
+}
+
 /* 도구 화면의 적용 범위 띠 (썸네일 위 한 줄) */
 .strip-track {
   position: absolute;

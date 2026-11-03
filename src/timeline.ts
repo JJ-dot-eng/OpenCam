@@ -63,6 +63,17 @@ export function dragBand(edge: BandEdge, orig: Span, value: number, total: numbe
   return { start, end: start + len };
 }
 
+/** 고른 프레임 번호들을 이어진 구간으로 묶는다 (축소 보기에서 선택을 칠할 때) */
+export function runs(indexes: number[]): Span[] {
+  const out: Span[] = [];
+  for (const i of [...indexes].sort((a, b) => a - b)) {
+    const r = out[out.length - 1];
+    if (r && i <= r.end + 1) r.end = Math.max(r.end, i);
+    else out.push({ start: i, end: i });
+  }
+  return out;
+}
+
 /** 띠 이름 뒤에 붙는 말: "5~20번 · 1.60초" */
 export function spanText(delays: number[], s: Span): string {
   const no = s.start === s.end ? `${s.start + 1}번` : `${s.start + 1}~${s.end + 1}번`;

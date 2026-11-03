@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dragBand, framesBackMs, framesForMs, spanMs, spanText } from "../src/timeline.ts";
+import { dragBand, framesBackMs, framesForMs, runs, spanMs, spanText } from "../src/timeline.ts";
 
 const delays = [100, 100, 200, 50, 50, 500];
 
@@ -48,4 +48,14 @@ test("dragBand never asks for more frames than exist", () => {
 test("spanText shows frame numbers from 1 and the length in seconds", () => {
   assert.equal(spanText(delays, { start: 0, end: 2 }), "1~3번 · 0.40초");
   assert.equal(spanText(delays, { start: 5, end: 5 }), "6번 · 0.50초");
+});
+
+test("runs groups selected frames into continuous spans, in any order", () => {
+  assert.deepEqual(runs([]), []);
+  assert.deepEqual(runs([5, 1, 2, 3, 9, 6]), [
+    { start: 1, end: 3 },
+    { start: 5, end: 6 },
+    { start: 9, end: 9 },
+  ]);
+  assert.deepEqual(runs([4, 4, 5]), [{ start: 4, end: 5 }]);
 });
