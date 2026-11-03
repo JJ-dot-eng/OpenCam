@@ -140,7 +140,10 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
   const hasQuality = format !== "apng" && format !== "png";
   const canFit = format === "gif" || format === "webp";
   const fitting = canFit && fitBySize;
-  const tooFast = format === "gif" && !limitFps && frames.some((f) => f.delayMs < 20);
+  // 용량에 맞추기에서 "변경 가능"으로 고른 항목은 아래 설정을 무시하고 알아서 정한다 (가장 큰 값에서 시작)
+  const autoFps = fitting && allowFps;
+  const autoResize = fitting && allowResize;
+  const tooFast = format === "gif" && (autoFps || !limitFps) && frames.some((f) => f.delayMs < 20);
   const working = progress !== null && !done && !error;
 
   const calc = async () => {
@@ -249,7 +252,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         )}
         {done.fit && !done.fit.fitted && (
           <p className="warn">
-            모든 설정을 낮춰도 목표 {done.fit.targetBytes / 1_000_000}MB보다 큽니다. 구간을 줄이거나 ‘줄여도 되는 것’을 더
+            모든 설정을 낮춰도 목표 {done.fit.targetBytes / 1_000_000}MB보다 큽니다. 구간을 줄이거나 ‘변경 가능’을 더
             켜 보세요.
           </p>
         )}
@@ -339,8 +342,12 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
 
   const width = frames[0]?.width ?? 0;
   const height = frames[0]?.height ?? 0;
-  const outW = Math.max(1, Math.floor((width * (resize || 100)) / 100));
-  const outH = Math.max(1, Math.floor((height * (resize || 100)) / 100));
+  // 크기를 알아서 정할 때는 원래 크기가 가장 큰 값
+  const outPct = autoResize ? 100 : resize || 100;
+  const outW = Math.max(1, Math.floor((width * outPct) / 100));
+  const outH = Math.max(1, Math.floor((height * outPct) / 100));
+  /** 용량에 맞추기가 정하는 칸에 붙이는 말 */
+  const autoNote = <span className="hint">용량에 맞추기가 정함</span>;
 
   return (
     <Modal title="저장" onClose={() => !working && onClose()} className="pane-modal">
@@ -403,12 +410,20 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
                         ]}
                       />
                     </Field>
-                    <Field label="줄여도 됨">
+                    <Field label="변경 가능">
                       <Check label="화질" checked={allowQuality} onChange={setAllowQuality} disabled={working} />
                       <Check label="FPS" checked={allowFps} onChange={setAllowFps} disabled={working} />
                       <Check label="이미지 크기" checked={allowResize} onChange={setAllowResize} disabled={working} />
                     </Field>
-                    <p className="hint">화질 → FPS → 이미지 크기 순으로 낮춰 목표 안에 맞춥니다</p>
+                    <p className="hint">
+                      고른 항목은 가장 높은 값(화질 100, 원래 FPS, 원래 크기)에서 시작해 화질 → FPS → 이미지 크기 순으로 낮추며 목표에 가장
+                      가깝게 맞춥니다. 고르지 않은 항목은 직접 정한 값 그대로 씁니다.
+                    </p>
+                    {!allowQuality && (
+                      <Field label="화질">
+                        <Slider label="화질" value={quality} min={1} max={100} disabled={working} onChange={setQuality} />
+                      </Field>
+                    )}
                   </>
                 ) : (
                   <Field label="화질">
@@ -420,31 +435,52 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
 
             <Section title="파일 크기 줄이기">
               <Field label="FPS 제한">
-                <Check label="" checked={limitFps} onChange={setLimitFps} disabled={working} />
-                <NumInput value={limitFpsValue} min={1} max={100} unit="FPS" label="FPS 제한" disabled={!limitFps || working} onChange={setLimitFpsValue} />
+                <Check label="" checked={limitFps} onChange={setLimitFps} disabled={working || autoFps} />
+                <NumInput
+                  value={limitFpsValue}
+                  min={1}
+                  max={100}
+                  unit="FPS"
+                  label="FPS 제한"
+                  disabled={!limitFps || working || autoFps}
+                  onChange={setLimitFpsValue}
+                />
+                {autoFps && autoNote}
               </Field>
               <Field label="비슷한 장면">
-                <Check label="" checked={skipSimilar} onChange={setSkipSimilar} disabled={working} />
-                <NumInput value={skipPct} min={0} max={50} unit="%" label="비슷한 이미지 건너뛰기" disabled={!skipSimilar || working} onChange={setSkipPct} />
-                <span className="hint">이하로 다르면 건너뛰기</span>
+                <Check label="" checked={skipSimilar} onChange={setSkipSimilar} disabled={working || autoFps} />
+                <NumInput
+                  value={skipPct}
+                  min={0}
+                  max={50}
+                  unit="%"
+                  label="비슷한 이미지 건너뛰기"
+                  disabled={!skipSimilar || working || autoFps}
+                  onChange={setSkipPct}
+                />
+                {autoFps ? autoNote : <span className="hint">이하로 다르면 건너뛰기</span>}
               </Field>
               <Field label="시간 제한" sub>
-                <Check label="" checked={skipTime} onChange={setSkipTime} disabled={!skipSimilar || working} />
+                <Check label="" checked={skipTime} onChange={setSkipTime} disabled={!skipSimilar || working || autoFps} />
                 <NumInput
                   value={skipTimeMs}
                   min={10}
                   unit="ms"
                   label="건너뛰기 시간 제한"
                   wide
-                  disabled={!skipSimilar || !skipTime || working}
+                  disabled={!skipSimilar || !skipTime || working || autoFps}
                   onChange={setSkipTimeMs}
                 />
               </Field>
               <Field label="이미지 크기">
-                <NumInput value={resize} min={1} max={400} unit="%" label="이미지 크기" disabled={working} onChange={setResize} />
-                <span className="hint">
-                  → {outW} × {outH}
-                </span>
+                <NumInput value={resize} min={1} max={400} unit="%" label="이미지 크기" disabled={working || autoResize} onChange={setResize} />
+                {autoResize ? (
+                  autoNote
+                ) : (
+                  <span className="hint">
+                    → {outW} × {outH}
+                  </span>
+                )}
               </Field>
             </Section>
 
@@ -547,6 +583,7 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
           {/* 결과 요약: 크기·장수와 예상 크기 */}
           <div className="save-sum">
             <span>
+              {autoResize && "최대 "}
               {outW} × {outH} · {frames.length}장{fitting && ` · 목표 ${targetMb}MB 안으로`}
             </span>
             {!fitting && (
