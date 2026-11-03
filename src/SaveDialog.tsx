@@ -1,19 +1,22 @@
-// 저장 창: 형식·화질·파일 크기 줄이기 → 저장 → 저장 뒤 할 일.
+// 저장 창: 왼쪽 형식 목록 + 오른쪽 그 형식의 설정(도구 패널과 같은 부품) → 저장 → 저장 뒤 할 일.
 
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, errText, ExportOptions, ExportResult, extOf, Format, FORMAT_EXT, formatBytes, FrameInfo, hexToRgb, Settings } from "./api";
-import { Check, Modal, NumField } from "./dialogs";
+import { IconArrowBack, IconCircleDot, IconFolderOpen, IconTrash, IconX } from "@tabler/icons-react";
+import { Check, Modal } from "./dialogs";
+import { ColorInput, Field, NumInput, Section, Segmented, Slider } from "./Panel";
 import { chooseAsk, confirmAsk } from "./ask";
 
-const FORMATS: [Format, string][] = [
-  ["webp", "WebP"],
-  ["gif", "GIF"],
-  ["apng", "APNG"],
-  ["mp4", "MP4"],
-  ["webm", "WebM"],
-  ["avif", "AVIF"],
-  ["png", "PNG 연속 이미지"],
+/** [형식, 이름, 한 줄 설명] */
+const FORMATS: [Format, string, string][] = [
+  ["webp", "WebP", "작고 선명해요 · 웹·메신저"],
+  ["gif", "GIF", "어디서나 재생 · 256색"],
+  ["apng", "APNG", "투명 배경을 그대로"],
+  ["mp4", "MP4", "긴 영상도 아주 작게"],
+  ["webm", "WebM", "웹용 영상 · 투명 지원"],
+  ["avif", "AVIF", "가장 작게 · 새 브라우저"],
+  ["png", "PNG 연속 이미지", "프레임마다 그림 파일"],
 ];
 
 function defaultQuality(s: Settings, f: Format): number {
@@ -210,9 +213,13 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         )}
         <div className="col">
           <button className="primary" onClick={() => api.revealFile(done.paths[0]).catch((e) => setError(errText(e)))}>
-            📂 폴더 열기
+            <IconFolderOpen size={18} />
+            폴더 열기
           </button>
-          <button onClick={onClose}>편집으로 돌아가기</button>
+          <button onClick={onClose}>
+            <IconArrowBack size={18} />
+            편집으로 돌아가기
+          </button>
           <button
             onClick={async () => {
               if (!(await confirmAsk("방금 저장한 파일을 지울까요?", "지우기"))) return;
@@ -233,159 +240,212 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
               }
             }}
           >
-            🗑 파일 삭제하고 돌아가기
+            <IconTrash size={18} />
+            파일 삭제하고 돌아가기
           </button>
-          <button onClick={onNewRecording}>● 새로 녹화하기</button>
+          <button onClick={onNewRecording}>
+            <IconCircleDot size={18} />
+            새로 녹화하기
+          </button>
         </div>
         {error && <p className="error">{error}</p>}
       </Modal>
     );
   }
 
+  const width = frames[0]?.width ?? 0;
+  const height = frames[0]?.height ?? 0;
+  const outW = Math.max(1, Math.floor((width * (resize || 100)) / 100));
+  const outH = Math.max(1, Math.floor((height * (resize || 100)) / 100));
+
   return (
-    <Modal title="저장" onClose={() => !working && onClose()} wide>
-      <div className="row">
-        <label className="field grow">
-          <span>파일</span>
-          <input className="path" value={path} onChange={(e) => setPath(e.target.value)} disabled={working} />
-        </label>
-        <button
-          disabled={working}
-          onClick={async () => {
-            const p = await api.pickSavePath(path, FORMAT_EXT[format]);
-            if (p) setPath(p);
-          }}
-        >
-          찾아보기…
-        </button>
-      </div>
-
-      <div className="formats">
-        {FORMATS.map(([f, label]) => (
-          <button key={f} className={f === format ? "on" : ""} disabled={working} onClick={() => setFormat(f)}>
-            {label}
-          </button>
-        ))}
-      </div>
-      {needsFfmpeg && !ffmpeg && (
-        <p className="error">ffmpeg.exe를 찾지 못했습니다. ffmpeg를 설치하거나 OpenCam 폴더에 넣어 주세요.</p>
-      )}
-
-      {/* 용량에 맞추기 (GIF·WebP): 목표 크기를 정하면 화질·FPS·크기를 알아서 낮춘다 */}
-      {canFit && (
-        <div className="row">
-          <span>기준</span>
-          <button className={!fitBySize ? "on" : ""} disabled={working} onClick={() => setFitBySize(false)}>
-            화질 직접 정하기
-          </button>
-          <button className={fitBySize ? "on" : ""} disabled={working} onClick={() => setFitBySize(true)}>
-            용량에 맞추기
-          </button>
-        </div>
-      )}
-      {fitting && (
-        <>
-          <div className="row">
-            <NumField label="목표" value={targetMb} min={1} max={4000} suffix="MB" disabled={working} onChange={setTargetMb} />
-            {[5, 10, 20, 50].map((n) => (
-              <button key={n} className={targetMb === n ? "on" : ""} disabled={working} onClick={() => setTargetMb(n)}>
-                {n}
-              </button>
-            ))}
-          </div>
-          <div className="row">
-            <span>줄여도 되는 것:</span>
-            <Check label="화질" checked={allowQuality} onChange={setAllowQuality} disabled={working} />
-            <Check label="FPS" checked={allowFps} onChange={setAllowFps} disabled={working} />
-            <Check label="이미지 크기" checked={allowResize} onChange={setAllowResize} disabled={working} />
-          </div>
-          <p className="hint">화질 → FPS → 이미지 크기 순으로 낮춰 목표 안에 맞춥니다</p>
-        </>
-      )}
-      {hasQuality && !fitting && (
-        <label className="field">
-          <span>화질</span>
-          <input
-            type="range"
-            min={1}
-            max={100}
-            value={quality}
-            disabled={working}
-            onChange={(e) => setQuality(Number(e.target.value))}
-          />
-          <em>{quality}</em>
-        </label>
-      )}
-
-      <h3>파일 크기 줄이기</h3>
-      <div className="group">
-        <div className="row">
-          <Check label="FPS 제한" checked={limitFps} onChange={setLimitFps} disabled={working} />
-          <NumField label="" value={limitFpsValue} min={1} max={100} suffix="FPS" disabled={!limitFps || working} onChange={setLimitFpsValue} />
-        </div>
-        <div className="row">
-          <Check label="비슷한 이미지 건너뛰기" checked={skipSimilar} onChange={setSkipSimilar} disabled={working} />
-          <NumField label="" value={skipPct} min={0} max={50} suffix="%" disabled={!skipSimilar || working} onChange={setSkipPct} />
-          <Check label="시간 제한" checked={skipTime} onChange={setSkipTime} disabled={!skipSimilar || working} />
-          <NumField label="" value={skipTimeMs} min={10} suffix="ms" disabled={!skipSimilar || !skipTime || working} onChange={setSkipTimeMs} />
-        </div>
-        <div className="row">
-          <NumField label="이미지 크기" value={resize} min={1} max={400} suffix="%" disabled={working} onChange={setResize} />
-          <span className="hint">
-            → {Math.max(1, Math.floor(((frames[0]?.width ?? 0) * (resize || 100)) / 100))} ×{" "}
-            {Math.max(1, Math.floor(((frames[0]?.height ?? 0) * (resize || 100)) / 100))}
-          </span>
-        </div>
-      </div>
-      <Check label="재생 진행 막대 넣기" checked={progressBar} onChange={setProgressBar} disabled={working} />
-      {format === "gif" && (
-        <div className="row">
-          <span className="hint">색상 보호하기</span>
-          {protect.map((c, i) => (
-            <span key={i} className="row protect-color">
-              <input
-                type="color"
-                value={c}
+    <Modal title="저장" onClose={() => !working && onClose()} className="save-modal">
+      <div className="save-grid">
+        {/* 왼쪽: 형식 목록 (한 줄 설명으로 무엇을 고를지 돕는다) */}
+        <div className="save-formats" role="radiogroup" aria-label="저장 형식">
+          {FORMATS.map(([f, label, desc]) => {
+            const noFfmpeg = (f === "mp4" || f === "webm" || f === "avif") && !ffmpeg;
+            return (
+              <button
+                key={f}
+                role="radio"
+                aria-checked={f === format}
+                className={f === format ? "on" : ""}
                 disabled={working}
-                onChange={(e) => setProtect((p) => p.map((x, k) => (k === i ? e.target.value : x)))}
-              />
-              <button disabled={working} onClick={() => setProtect((p) => p.filter((_, k) => k !== i))} title="빼기">
-                ✕
+                onClick={() => setFormat(f)}
+              >
+                <span>{label}</span>
+                <small className={noFfmpeg ? "need" : ""}>{noFfmpeg ? "ffmpeg가 필요해요" : desc}</small>
               </button>
+            );
+          })}
+        </div>
+
+        {/* 오른쪽: 고른 형식의 설정 (길면 이 부분만 스크롤) + 늘 보이는 결과 요약 */}
+        <div className="save-right">
+          <div className="save-settings">
+            {needsFfmpeg && !ffmpeg && (
+              <p className="error save-note">ffmpeg.exe를 찾지 못했습니다. ffmpeg를 설치하거나 OpenCam 폴더에 넣어 주세요.</p>
+            )}
+            {hasQuality && (
+              <Section title={canFit ? "화질·용량" : "화질"}>
+                {/* 용량에 맞추기 (GIF·WebP): 목표 크기를 정하면 화질·FPS·크기를 알아서 낮춘다 */}
+                {canFit && (
+                  <Field label="기준">
+                    <Segmented
+                      label="기준"
+                      value={fitBySize ? "size" : "quality"}
+                      onChange={(v) => setFitBySize(v === "size")}
+                      options={[
+                        ["quality", "화질 직접 정하기"],
+                        ["size", "용량에 맞추기"],
+                      ]}
+                    />
+                  </Field>
+                )}
+                {fitting ? (
+                  <>
+                    <Field label="목표">
+                      <NumInput value={targetMb} min={1} max={4000} unit="MB" label="목표 크기" disabled={working} onChange={setTargetMb} />
+                      <Segmented
+                        label="자주 쓰는 목표 크기"
+                        value={String(targetMb)}
+                        onChange={(v) => setTargetMb(Number(v))}
+                        options={[
+                          ["5", "5"],
+                          ["10", "10"],
+                          ["20", "20"],
+                          ["50", "50"],
+                        ]}
+                      />
+                    </Field>
+                    <Field label="줄여도 됨">
+                      <Check label="화질" checked={allowQuality} onChange={setAllowQuality} disabled={working} />
+                      <Check label="FPS" checked={allowFps} onChange={setAllowFps} disabled={working} />
+                      <Check label="이미지 크기" checked={allowResize} onChange={setAllowResize} disabled={working} />
+                    </Field>
+                    <p className="hint">화질 → FPS → 이미지 크기 순으로 낮춰 목표 안에 맞춥니다</p>
+                  </>
+                ) : (
+                  <Field label="화질">
+                    <Slider label="화질" value={quality} min={1} max={100} disabled={working} onChange={setQuality} />
+                  </Field>
+                )}
+              </Section>
+            )}
+
+            <Section title="파일 크기 줄이기">
+              <Field label="FPS 제한">
+                <Check label="" checked={limitFps} onChange={setLimitFps} disabled={working} />
+                <NumInput value={limitFpsValue} min={1} max={100} unit="FPS" label="FPS 제한" disabled={!limitFps || working} onChange={setLimitFpsValue} />
+              </Field>
+              <Field label="비슷한 장면">
+                <Check label="" checked={skipSimilar} onChange={setSkipSimilar} disabled={working} />
+                <NumInput value={skipPct} min={0} max={50} unit="%" label="비슷한 이미지 건너뛰기" disabled={!skipSimilar || working} onChange={setSkipPct} />
+                <span className="hint">이하로 다르면 건너뛰기</span>
+              </Field>
+              <Field label="시간 제한" sub>
+                <Check label="" checked={skipTime} onChange={setSkipTime} disabled={!skipSimilar || working} />
+                <NumInput
+                  value={skipTimeMs}
+                  min={10}
+                  unit="ms"
+                  label="건너뛰기 시간 제한"
+                  wide
+                  disabled={!skipSimilar || !skipTime || working}
+                  onChange={setSkipTimeMs}
+                />
+              </Field>
+              <Field label="이미지 크기">
+                <NumInput value={resize} min={1} max={400} unit="%" label="이미지 크기" disabled={working} onChange={setResize} />
+                <span className="hint">
+                  → {outW} × {outH}
+                </span>
+              </Field>
+            </Section>
+
+            <Section title="추가 옵션">
+              <Field label="진행 막대">
+                <Check label="재생 진행 막대 넣기" checked={progressBar} onChange={setProgressBar} disabled={working} />
+              </Field>
+              {format === "gif" && (
+                <Field label="색 보호">
+                  <div className="save-colors">
+                    {protect.map((c, i) => (
+                      <span key={i} className="save-color">
+                        <ColorInput
+                          label={`보호할 색 ${i + 1}`}
+                          value={c}
+                          disabled={working}
+                          onChange={(v) => setProtect((p) => p.map((x, k) => (k === i ? v : x)))}
+                        />
+                        <button
+                          className="icon ghost"
+                          disabled={working}
+                          onClick={() => setProtect((p) => p.filter((_, k) => k !== i))}
+                          title="빼기"
+                        >
+                          <IconX size={14} />
+                        </button>
+                      </span>
+                    ))}
+                    <button disabled={working || protect.length >= 16} onClick={() => setProtect((p) => [...p, "#ff0000"])}>
+                      + 보호할 색
+                    </button>
+                    {protect.length > 0 && <p className="hint">이 색들은 GIF에서 그대로 남습니다</p>}
+                  </div>
+                </Field>
+              )}
+            </Section>
+          </div>
+
+          {/* 결과 요약: 크기·장수와 예상 크기 */}
+          <div className="save-sum">
+            <span>
+              {outW} × {outH} · {frames.length}장{fitting && ` · 목표 ${targetMb}MB 안으로`}
             </span>
-          ))}
-          <button disabled={working || protect.length >= 16} onClick={() => setProtect((p) => [...p, "#ff0000"])}>
-            + 보호할 색
-          </button>
-          {protect.length > 0 && <span className="hint">(이 색들은 GIF에서 그대로 남습니다)</span>}
+            {!fitting && (
+              <>
+                <span className="grow" />
+                {estimate && <b>{estimate}</b>}
+                <button onClick={calc} disabled={working || (needsFfmpeg && !ffmpeg)}>
+                  예상 크기 계산
+                </button>
+              </>
+            )}
+          </div>
+          {tooFast && <p className="warn save-note">20ms보다 짧은 프레임이 있어 브라우저에서 느리게 재생될 수 있습니다.</p>}
         </div>
-      )}
-      {tooFast && <p className="warn">20ms보다 짧은 프레임이 있어 브라우저에서 느리게 재생될 수 있습니다.</p>}
+      </div>
 
-      {working && progress && (
-        <div className="progress">
-          <div className="bar" style={{ width: `${Math.round(progress.p * 100)}%` }} />
-          <span>
-            {progress.msg} {Math.round(progress.p * 100)}%
-          </span>
-        </div>
-      )}
-      {error && <p className="error">{error}</p>}
-
-      <div className="modal-foot">
-        {!fitting && (
-          <button onClick={calc} disabled={working || (needsFfmpeg && !ffmpeg)}>
-            예상 크기 계산
-          </button>
+      <div className="save-foot">
+        {working && progress && (
+          <div className="progress">
+            <div className="bar" style={{ width: `${Math.round(progress.p * 100)}%` }} />
+            <span>
+              {progress.msg} {Math.round(progress.p * 100)}%
+            </span>
+          </div>
         )}
-        {!fitting && estimate && <span className="hint">{estimate}</span>}
-        <span className="grow" />
-        <button onClick={onClose} disabled={working}>
-          취소
-        </button>
-        <button className="primary" onClick={save} disabled={working || !path || (needsFfmpeg && !ffmpeg)}>
-          {working ? "저장 중…" : fitting ? "용량에 맞춰 저장" : "저장"}
-        </button>
+        {error && <p className="error">{error}</p>}
+        <div className="save-foot-row">
+          <input className="path" aria-label="저장할 파일" value={path} onChange={(e) => setPath(e.target.value)} disabled={working} />
+          <button
+            disabled={working}
+            onClick={async () => {
+              const p = await api.pickSavePath(path, FORMAT_EXT[format]);
+              if (p) setPath(p);
+            }}
+          >
+            찾아보기…
+          </button>
+          <button onClick={onClose} disabled={working}>
+            취소
+          </button>
+          <button className="primary" onClick={save} disabled={working || !path || (needsFfmpeg && !ffmpeg)}>
+            {working ? "저장 중…" : fitting ? "용량에 맞춰 저장" : "저장"}
+          </button>
+        </div>
       </div>
     </Modal>
   );

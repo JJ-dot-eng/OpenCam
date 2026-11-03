@@ -41,6 +41,7 @@ export function Modal({
   disabledReason,
   dirty,
   cancelOnly,
+  className,
 }: {
   title: string;
   children: ReactNode;
@@ -58,6 +59,8 @@ export function Modal({
   dirty?: boolean;
   /** 취소 버튼으로만 닫는다 (바깥 클릭·Esc로 닫히지 않음). 고른 설정을 실수로 잃지 않게. */
   cancelOnly?: boolean;
+  /** 이 창만의 모양을 붙일 때 (예: 저장 창의 두 칸 배치) */
+  className?: string;
 }) {
   const inPanel = useContext(ModalInPanel);
   const id = useRef(0);
@@ -113,7 +116,7 @@ export function Modal({
 
   return (
     <div className="modal-back" onMouseDown={(e) => !cancelOnly && e.target === e.currentTarget && onClose()}>
-      <div className={`modal ${wide ? "wide" : ""}`} role="dialog" aria-label={title}>
+      <div className={`modal ${wide ? "wide" : ""} ${className ?? ""}`} role="dialog" aria-label={title}>
         <h2>{title}</h2>
         <div className="modal-body">{children}</div>
         {onOk && (
