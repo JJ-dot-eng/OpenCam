@@ -69,6 +69,7 @@ export function VideoImportDialog({
       okDisabled={!valid}
       okText="불러오기"
       wide
+      cancelOnly
     >
       <p className="hint">
         {name} · {info.width} × {info.height} · {(dur / 1000).toFixed(1)}초 · {info.fps.toFixed(1)} FPS
@@ -143,6 +144,7 @@ export function ImagesImportDialog({
         onImport(Math.round(ms), fit);
       }}
       okText="불러오기"
+      cancelOnly
     >
       <p className="hint">
         {paths.length}개 파일을 이름 순서대로 이어 붙입니다. 크기는 첫 번째 그림에 맞춥니다.

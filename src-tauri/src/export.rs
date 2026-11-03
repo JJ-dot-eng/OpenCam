@@ -147,20 +147,21 @@ pub fn export_fit(
     }
     let steps = fit_ladder(frames, opt, fit);
     let whole = frames.len() <= 40;
-    let sample = if whole {
-        frames.to_vec()
+    // 구간마다 따로 저장해 크기를 더한다. WebP 인코더는 한 번에 코어 하나만 쓰므로 구간을 나란히 돌리면 빠르다.
+    let segments: Vec<&[Frame]> = if whole {
+        vec![frames]
     } else {
         let len = (frames.len() / 25).max(2);
         (0..5)
-            .flat_map(|i| {
+            .map(|i| {
                 let start = (frames.len() - len) * i / 4;
-                frames[start..start + len].iter().cloned()
+                &frames[start..start + len]
             })
             .collect()
     };
     let duration = |fs: &[Frame]| -> u128 { fs.iter().map(|f| u128::from(f.delay_ms)).sum() };
     let total_ms = duration(frames);
-    let sample_ms = duration(&sample);
+    let sample_ms: u128 = segments.iter().map(|seg| duration(seg)).sum();
     let aim = u128::from(fit.target_bytes) * 95 / 100;
 
     // 짐작은 진행률 0~50%. 반씩 좁히므로 대략 log2(단계 수)번 한다.
@@ -170,7 +171,8 @@ pub fn export_fit(
         let mid = (low + high) / 2;
         let step = &steps[mid];
         progress((tries as f32 / rounds * 0.5).min(0.49), "예상 크기 계산 중");
-        let size = u128::from(estimate_size(&sample, step, s)?);
+        let sizes = segments.par_iter().map(|seg| estimate_size(seg, step, s)).collect::<Result<Vec<_>>>()?;
+        let size: u128 = sizes.into_iter().map(u128::from).sum();
         let estimate = if whole || sample_ms == 0 { size } else { size.saturating_mul(total_ms) / sample_ms };
         tries += 1;
         let msg = format!("{tries}번째 예상 - {} → 예상 {:.1}MB", fit_step_text(step), estimate as f64 / 1_000_000.0);
@@ -725,6 +727,36 @@ fn webp_stamp(t: u64) -> Result<i32> {
 }
 
 fn webp(frames: &[Frame], path: &Path, quality: u8, s: &Settings, progress: Progress) -> Result<()> {
+    // 너무 길면 인코딩하기 전에 알린다
+    webp_stamp(frames.iter().map(|f| u64::from(f.delay_ms)).sum())?;
+    let parts = (frames.len() / 8).clamp(1, rayon::current_num_threads().max(1));
+    let data = write_webp(frames, quality, s, parts, progress)?;
+    std::fs::write(path, data)?;
+    Ok(())
+}
+
+/// WebP 인코더는 한 번에 코어 하나만 쓴다. 그래서 프레임을 parts개로 나눠 동시에 각각 애니메이션으로 만들고
+/// 프레임 조각(ANMF)만 차례로 이어 붙인다. 나눈 곳의 첫 프레임은 통째로 저장되어 아주 조금 커질 수 있다.
+/// 이어 붙일 수 없는 모양이 나오면(한 장짜리라 정지 그림으로 나오는 경우 등) 한 번에 다시 만든다.
+fn write_webp(frames: &[Frame], quality: u8, s: &Settings, parts: usize, progress: Progress) -> Result<Vec<u8>> {
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let step = || {
+        let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        progress(n as f32 / frames.len() as f32, "WebP 인코딩 중");
+    };
+    if parts > 1 {
+        let len = frames.len().div_ceil(parts);
+        let encoded = frames.par_chunks(len).map(|part| webp_part(part, quality, s, &step)).collect::<Result<Vec<_>>>()?;
+        if let Some(data) = join_webp_parts(&encoded) {
+            return Ok(data);
+        }
+        done.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    webp_part(frames, quality, s, &step)
+}
+
+/// 프레임들을 WebP 애니메이션 하나로 만든다. 시간은 이 묶음의 처음부터 센다.
+fn webp_part(frames: &[Frame], quality: u8, s: &Settings, step: &(dyn Fn() + Sync)) -> Result<Vec<u8>> {
     use webp_animation::{AnimParams, Encoder, EncoderOptions, EncodingConfig, EncodingType};
     let (w, h) = (frames[0].width, frames[0].height);
     let config = EncodingConfig {
@@ -744,17 +776,74 @@ fn webp(frames: &[Frame], path: &Path, quality: u8, s: &Settings, progress: Prog
         opts.allow_mixed = false;
     }
     let mut enc = Encoder::new_with_options((w, h), opts).map_err(|e| anyhow!("WebP 인코더 오류: {e:?}"))?;
-    // 너무 길면 인코딩하기 전에 알린다
-    webp_stamp(frames.iter().map(|f| u64::from(f.delay_ms)).sum())?;
     let mut t = 0u64;
-    for (i, f) in frames.iter().enumerate() {
+    for f in frames {
         enc.add_frame(&f.rgba(), webp_stamp(t)?).map_err(|e| anyhow!("WebP 프레임 오류: {e:?}"))?;
         t += u64::from(f.delay_ms);
-        progress((i + 1) as f32 / frames.len() as f32, "WebP 인코딩 중");
+        step();
     }
     let data = enc.finalize(webp_stamp(t)?).map_err(|e| anyhow!("WebP 저장 오류: {e:?}"))?;
-    std::fs::write(path, &*data)?;
-    Ok(())
+    Ok(data.to_vec())
+}
+
+/// RIFF 안의 조각들: (이름, 조각 전체 바이트). 모양이 틀리면 None.
+fn riff_chunks(data: &[u8]) -> Option<Vec<([u8; 4], &[u8])>> {
+    if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return None;
+    }
+    let mut out = vec![];
+    let mut pos = 12;
+    while pos < data.len() {
+        let head = data.get(pos..pos + 8)?;
+        let size = u32::from_le_bytes(head[4..8].try_into().ok()?) as usize;
+        // 조각 길이가 홀수면 1바이트를 채운다
+        let end = pos.checked_add(8 + size + (size & 1))?;
+        out.push((head[..4].try_into().ok()?, data.get(pos..end.min(data.len()))?));
+        pos = end;
+    }
+    Some(out)
+}
+
+/// 따로 만든 WebP 애니메이션들의 프레임을 하나로 잇는다. 첫 파일의 VP8X·ANIM(크기, 반복)을 쓰고
+/// 투명 표시는 하나라도 있으면 켠다. 애니메이션 모양(VP8X, ANIM, ANMF만)이 아니면 None.
+fn join_webp_parts(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
+    const ALPHA: u8 = 0x10;
+    let mut vp8x: Option<Vec<u8>> = None;
+    let mut anim: Option<&[u8]> = None;
+    let mut alpha = 0u8;
+    let mut frames: Vec<&[u8]> = vec![];
+    for part in parts {
+        let chunks = riff_chunks(part)?;
+        if chunks.iter().filter(|(name, _)| name == b"ANMF").count() == 0 {
+            return None;
+        }
+        for (name, chunk) in chunks {
+            match &name {
+                b"VP8X" => {
+                    alpha |= chunk.get(8)? & ALPHA;
+                    vp8x.get_or_insert_with(|| chunk.to_vec());
+                }
+                b"ANIM" => {
+                    anim.get_or_insert(chunk);
+                }
+                b"ANMF" => frames.push(chunk),
+                _ => return None,
+            }
+        }
+    }
+    let mut vp8x = vp8x?;
+    vp8x[8] |= alpha;
+    let body: usize = vp8x.len() + anim?.len() + frames.iter().map(|f| f.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(12 + body);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&u32::try_from(4 + body).ok()?.to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&vp8x);
+    out.extend_from_slice(anim?);
+    for f in frames {
+        out.extend_from_slice(f);
+    }
+    Some(out)
 }
 
 /// 모든 프레임이 함께 쓸 256색 팔레트로 줄인다 (APNG는 팔레트가 하나뿐이라서).
@@ -1279,6 +1368,67 @@ mod tests {
         assert!(info.fitted && info.quality == 80 && path.exists());
         assert!(export_fit(&input, &path, &opts(Format::Png), &fit(100), &s, &|_, _| {}).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// WebP를 디코딩해 (RGBA, 시간 ms) 목록으로
+    fn decode_webp(data: &[u8]) -> Vec<(Vec<u8>, u32)> {
+        use image::AnimationDecoder;
+        let d = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(data)).unwrap();
+        d.into_frames()
+            .map(|f| {
+                let f = f.unwrap();
+                let (n, dd) = f.delay().numer_denom_ms();
+                (f.into_buffer().into_raw(), n / dd)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn webp_parts_join_into_same_animation() {
+        // 무손실로 저장해 나눠 만든 결과가 원본과 픽셀·시간까지 같은지 본다. 반투명 프레임도 넣는다.
+        let input: Vec<Frame> = (0..37)
+            .map(|i| {
+                let px: Vec<u8> = (0..16 * 12)
+                    .flat_map(|p| {
+                        let a = if i == 20 && p % 3 == 0 { 128 } else { 255 };
+                        [(p * 7 + i * 13) as u8, (p * 3) as u8, (i * 29) as u8, a]
+                    })
+                    .collect();
+                Frame::from_rgba(16, 12, &px, 30 + (i as u32 % 4) * 10)
+            })
+            .collect();
+        for compat in [true, false] {
+            let s = Settings { webp_lossless: true, webp_iphone_compat: compat, ..Settings::default() };
+            let one = write_webp(&input, 80, &s, 1, &|_, _| {}).unwrap();
+            let split = write_webp(&input, 80, &s, 4, &|_, _| {}).unwrap();
+            assert!(join_webp_parts(&[one.clone(), one.clone()]).is_some(), "애니메이션끼리는 이어진다");
+            let decoded = decode_webp(&split);
+            assert_eq!(decoded.len(), input.len(), "아이폰 호환 {compat}");
+            // 브라우저와 같은 libwebp 디코더로도 끝까지 읽힌다
+            let official = webp_animation::Decoder::new(&split).unwrap().into_iter().count();
+            assert_eq!(official, input.len());
+            // 부분 프레임을 쓰면(아이폰 호환 끔) 나누지 않아도 무손실 인코더가 색을 1까지 바꾼다
+            let tol = if compat { 0 } else { 1 };
+            for (f, (px, ms)) in input.iter().zip(&decoded) {
+                assert_eq!(*ms, f.delay_ms);
+                assert!(px.iter().zip(f.rgba()).all(|(a, b)| a.abs_diff(b) <= tol), "아이폰 호환 {compat}");
+            }
+            assert_eq!(decode_webp(&one).len(), input.len());
+        }
+    }
+
+    #[test]
+    fn webp_join_rejects_still_image() {
+        // 한 장짜리 묶음은 정지 그림(VP8/VP8L)으로 나올 수 있어 잇지 않고 한 번에 다시 만든다
+        let s = Settings::default();
+        let still = webp_part(&frames(1, 100)[..], 80, &s, &|| {}).unwrap();
+        let anim = webp_part(&frames(3, 100), 80, &s, &|| {}).unwrap();
+        if riff_chunks(&still).unwrap().iter().all(|(name, _)| name != b"ANMF") {
+            assert!(join_webp_parts(&[anim.clone(), still]).is_none());
+        }
+        assert!(join_webp_parts(&[anim.clone(), b"RIFF".to_vec()]).is_none());
+        let joined = join_webp_parts(&[anim.clone(), anim]).unwrap();
+        assert_eq!(decode_webp(&joined).len(), 6);
     }
 
     #[derive(Default)]

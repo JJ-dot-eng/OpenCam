@@ -70,3 +70,8 @@ strip = true
 # 녹화·인코딩은 디버그 빌드에서도 빨라야 해서 의존성은 항상 최적화
 [profile.dev.package."*"]
 opt-level = 3
+
+# OpenCam 코드도 픽셀을 직접 도는 곳이 많아 최적화 없이는 저장·불러오기가 8~10배 느리다.
+# 개발용 실행에서도 실제 속도를 보도록 가볍게 최적화한다.
+[profile.dev]
+opt-level = 1

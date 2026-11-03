@@ -40,6 +40,7 @@ export function Modal({
   summary,
   disabledReason,
   dirty,
+  cancelOnly,
 }: {
   title: string;
   children: ReactNode;
@@ -55,6 +56,8 @@ export function Modal({
   summary?: ReactNode;
   disabledReason?: string | null;
   dirty?: boolean;
+  /** 취소 버튼으로만 닫는다 (바깥 클릭·Esc로 닫히지 않음). 고른 설정을 실수로 잃지 않게. */
+  cancelOnly?: boolean;
 }) {
   const inPanel = useContext(ModalInPanel);
   const id = useRef(0);
@@ -74,7 +77,9 @@ export function Modal({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (modalStack[modalStack.length - 1] !== id.current) return;
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        if (!cancelOnly) onClose();
+      }
       else if (e.key === "Enter" && onOk && !blocked && (e.target as HTMLElement).tagName !== "TEXTAREA") {
         e.preventDefault();
         onOk();
@@ -82,7 +87,7 @@ export function Modal({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, onOk, blocked]);
+  }, [onClose, onOk, blocked, cancelOnly]);
 
   if (inPanel)
     return (
@@ -107,7 +112,7 @@ export function Modal({
     );
 
   return (
-    <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="modal-back" onMouseDown={(e) => !cancelOnly && e.target === e.currentTarget && onClose()}>
       <div className={`modal ${wide ? "wide" : ""}`} role="dialog" aria-label={title}>
         <h2>{title}</h2>
         <div className="modal-body">{children}</div>
