@@ -863,7 +863,7 @@ input[type="range"] {
 /* 형식을 바꿔도 창이 위아래로 움직이지 않게 높이를 정해 두고 설정만 스크롤한다 */
 .save-grid {
   flex: none;
-  height: min(520px, calc(100vh - 170px));
+  height: min(590px, calc(100vh - 140px));
   display: grid;
   grid-template-columns: 196px minmax(0, 1fr);
 }
