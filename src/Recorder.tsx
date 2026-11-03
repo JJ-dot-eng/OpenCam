@@ -6,6 +6,7 @@ import { getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/ap
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
+  IconArrowBackUp,
   IconCamera,
   IconCheck,
   IconChevronDown,
@@ -91,6 +92,9 @@ export default function Recorder() {
   const barRef = useRef<HTMLDivElement>(null);
   const hover = useRef(false);
   const hideTimer = useRef(0);
+  // 전체 화면·창 맞추기·모니터 절반 등으로 바꾸기 전의 녹화 틀 (되돌리기 단추용).
+  // 보통 배치일 때만 기억해서, 여러 번 맞춰도 맨 처음 자리로 돌아간다. 직접 끌거나 크기를 바꾸면 잊는다.
+  const [restore, setRestore] = useState<{ x: number; y: number; w: number; h: number; frameOverride: number | null; bottom: boolean } | null>(null);
   // 배치 계산이 늘 최신 전체 화면 상태를 보게 한다 (끄자마자 이어서 다시 배치할 때 옛 값을 쓰지 않게)
   const fullRef = useRef<Rect | null>(null);
   fullRef.current = fullMonitor;
@@ -259,6 +263,13 @@ export default function Recorder() {
     [showNotice],
   );
 
+  const remember = useCallback(async () => {
+    if (restore || !layout || layout.mode !== "normal") return;
+    const p = await win.outerPosition();
+    const size = await win.innerSize();
+    setRestore({ x: p.x, y: p.y, w: size.width, h: size.height, frameOverride: frameOverride.current, bottom });
+  }, [restore, layout, bottom]);
+
   const toggleRecord = useCallback(async () => {
     try {
       if (recording) await api.recStop();
@@ -278,6 +289,7 @@ export default function Recorder() {
 
   const fitMonitor = useCallback(
     async (div: number) => {
+      await remember();
       const mons = await api.monitors();
       const pos = await win.outerPosition();
       const m = mons.find((r) => pos.x >= r.x && pos.x < r.x + r.w && pos.y >= r.y && pos.y < r.y + r.h) ?? mons[0];
@@ -287,11 +299,12 @@ export default function Recorder() {
       await setHoleSize(w, h);
       await setHolePos(m.x + Math.floor((m.w - w) / 2), m.y + Math.floor((m.h - h) / 2));
     },
-    [layout, setHoleSize, setHolePos],
+    [layout, setHoleSize, setHolePos, remember],
   );
 
   const fitFullMonitor = useCallback(async () => {
     try {
+      await remember();
       const mons = await api.monitors();
       const pos = await win.innerPosition();
       const m = mons.find((r) => pos.x >= r.x && pos.x < r.x + r.w && pos.y >= r.y && pos.y < r.y + r.h) ?? mons[0];
@@ -310,7 +323,26 @@ export default function Recorder() {
       setFullMonitor(m);
       showNotice("모니터 전체를 녹화합니다");
     } catch (e) { showNotice(errText(e)); }
-  }, [disableFull, relayout, showNotice]);
+  }, [disableFull, relayout, showNotice, remember]);
+
+  /** 맞추기 전의 녹화 틀 자리·크기(툴바 위아래까지)로 되돌린다 */
+  const restoreFrame = useCallback(async () => {
+    if (!restore) return;
+    try {
+      await disableFull();
+      frameOverride.current = restore.frameOverride;
+      if (settings && settings.recToolbarBottom !== restore.bottom) await saveSettings({ ...settings, recToolbarBottom: restore.bottom });
+      // 먼저 원래 모니터로 옮긴 뒤 크기를 정한다 (모니터마다 배율이 다를 수 있다)
+      await win.setPosition(new PhysicalPosition(restore.x, restore.y));
+      await win.setSize(new PhysicalSize(restore.w, restore.h));
+      await win.setPosition(new PhysicalPosition(restore.x, restore.y));
+      await relayout(restore.bottom);
+      setRestore(null);
+      showNotice("녹화 틀을 맞추기 전으로 되돌렸습니다");
+    } catch (e) {
+      showNotice(errText(e));
+    }
+  }, [restore, settings, saveSettings, disableFull, relayout, showNotice]);
 
   const chooseWindow = useCallback(async () => {
     if (recording) return;
@@ -325,6 +357,7 @@ export default function Recorder() {
 
   const fitRect = useCallback(async (r: Rect, activated = true) => {
     try {
+      await remember();
       // 지금 툴바가 화면 어디에 있는지 (자리가 없을 때 툴바만 그 자리에 남긴다)
       const pos0 = await win.innerPosition();
       const bar0 = layout ? { x: pos0.x + layout.bar.x, y: pos0.y + layout.bar.y, w: layout.bar.w } : null;
@@ -398,7 +431,7 @@ export default function Recorder() {
     } catch (e) {
       showNotice(errText(e));
     }
-  }, [bottom, settings, layout, saveSettings, relayout, showNotice, disableFull]);
+  }, [bottom, settings, layout, saveSettings, relayout, showNotice, disableFull, remember]);
 
   const fitWindow = useCallback(async (target: CaptureWindow) => {
     try {
@@ -521,6 +554,7 @@ export default function Recorder() {
   const grip = (dir: ResizeDir) => (e: React.MouseEvent) => {
     if (e.button !== 0 || recording || mode !== "normal") return;
     e.preventDefault();
+    setRestore(null);
     if (settings.useSemiTransparency) setResizing(true);
     if (settings.useMagnifier) void api.startMagnifier(layout.dpr).catch((error) => showNotice(errText(error)));
     void win.startResizeDragging(dir).catch((error) => { setResizing(false); showNotice(errText(error)); });
@@ -635,8 +669,9 @@ export default function Recorder() {
         style={barStyle}
         data-tauri-drag-region={drag}
         onMouseDownCapture={(e) => {
-          if (e.button === 0 && mode === "normal" && settings.useSemiTransparency &&
-              (e.target as HTMLElement).hasAttribute("data-tauri-drag-region")) setResizing(true);
+          if (e.button !== 0 || mode !== "normal" || !(e.target as HTMLElement).hasAttribute("data-tauri-drag-region")) return;
+          setRestore(null);
+          if (settings.useSemiTransparency) setResizing(true);
         }}
         onMouseEnter={() => {
           hover.current = true;
@@ -674,6 +709,12 @@ export default function Recorder() {
         {recording && (
           <button className="rec-btn icon" onClick={saveRecordingImage} title="현재 화면을 PNG로 저장 (Ctrl+S)">
             <IconCamera size={18} />
+          </button>
+        )}
+        {restore && !recording && (
+          <button className={`rec-btn ${small ? "" : "icon"}`} onClick={restoreFrame} title="녹화 틀을 맞추기 전 자리와 크기로 되돌리기">
+            <IconArrowBackUp size={16} />
+            {small && "되돌리기"}
           </button>
         )}
         {/* 가운데 칸: 자리가 모자라면 여기만 잘려서 오른쪽 닫기 버튼은 늘 보인다 */}
