@@ -82,6 +82,11 @@ export interface Settings {
   mp4ReplaceTransparent: boolean;
   transparentReplaceColor: number;
 
+  fitBySize: boolean;
+  fitTargetMb: number;
+  fitAllowQuality: boolean;
+  fitAllowFps: boolean;
+  fitAllowResize: boolean;
   limitFps: boolean;
   limitFpsValue: number;
   skipSimilar: boolean;
@@ -162,6 +167,22 @@ export const FORMAT_EXT: Record<Format, string> = {
 export interface ExportResult {
   paths: string[];
   size: number;
+  fit?: FitInfo | null;
+}
+
+export interface FitOptions {
+  targetBytes: number;
+  allowQuality: boolean;
+  allowFps: boolean;
+  allowResize: boolean;
+}
+
+export interface FitInfo {
+  quality: number;
+  limitFps: number | null;
+  resizePercent: number;
+  fitted: boolean;
+  targetBytes: number;
 }
 
 export interface ExportOptions {
@@ -378,6 +399,7 @@ export const api = {
   pickFolder: (current: string) => invoke<string | null>("pick_folder", { current }),
   exportConflicts: (opts: ExportOptions, path: string) => invoke<string[]>("export_conflicts", { opts, path }),
   exportProject: (opts: ExportOptions, path: string) => invoke<ExportResult>("export_project", { opts, path }),
+  exportProjectFit: (opts: ExportOptions, fit: FitOptions, path: string) => invoke<ExportResult>("export_project_fit", { opts, fit, path }),
   estimateSize: (opts: ExportOptions) => invoke<number>("estimate_size", { opts }),
   hasFfmpeg: () => invoke<boolean>("has_ffmpeg"),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),

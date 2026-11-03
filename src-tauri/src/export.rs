@@ -6,7 +6,7 @@ use crate::project::{find_similar, resize_rgba};
 use crate::settings::Settings;
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -54,6 +54,179 @@ pub struct ExportOptions {
     /// GIF를 20ms 간격(50 FPS)으로 다시 뽑는다. 20ms보다 짧은 프레임은 GIF에 쓸 수 없어서.
     #[serde(default)]
     pub gif_fit_50fps: bool,
+}
+
+/// 용량에 맞추기: 목표 크기와 낮춰도 되는 항목 (저장 창에서 넘어온다)
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FitOptions {
+    pub target_bytes: u64,
+    pub allow_quality: bool,
+    pub allow_fps: bool,
+    pub allow_resize: bool,
+}
+
+/// 용량에 맞추기로 실제로 쓴 설정. fitted가 false면 다 낮춰도 목표보다 크다.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FitInfo {
+    pub quality: u8,
+    pub limit_fps: Option<u32>,
+    pub resize_percent: u32,
+    pub fitted: bool,
+    pub target_bytes: u64,
+}
+
+/// 시험해 볼 설정 목록. 뒤로 갈수록 작아진다: 화질(50까지) → FPS(20·15·10) → 이미지 크기(50%까지).
+/// 앞 단계에서 낮춘 값은 그대로 두고 다음 단계를 더한다.
+fn fit_ladder(frames: &[Frame], opt: &ExportOptions, fit: &FitOptions) -> Vec<ExportOptions> {
+    let mut steps = vec![opt.clone()];
+    let mut current = opt.clone();
+    if fit.allow_quality && opt.quality > 50 {
+        let mut q = i32::from(opt.quality) - 10;
+        while q >= 50 {
+            current.quality = q as u8;
+            steps.push(current.clone());
+            q -= 10;
+        }
+        if current.quality != 50 {
+            current.quality = 50;
+            steps.push(current.clone());
+        }
+    }
+    // 지금 FPS: 사용자가 정한 제한, 없으면 프레임 시간의 가운데 값으로 셈
+    let mut delays: Vec<u32> = frames.iter().map(|f| f.delay_ms.max(1)).collect();
+    delays.sort_unstable();
+    let cap = opt.limit_fps.filter(|&f| f > 0).unwrap_or_else(|| {
+        delays.get(delays.len() / 2).map_or(0, |d| (1000.0 / *d as f64).round() as u32)
+    });
+    if fit.allow_fps {
+        for fps in [20, 15, 10] {
+            if fps < cap {
+                current.limit_fps = Some(fps);
+                steps.push(current.clone());
+            }
+        }
+    }
+    if fit.allow_resize {
+        for p in [90u64, 80, 70, 60, 50] {
+            let size = ((u64::from(opt.resize_percent) * p + 50) / 100).max(1) as u32;
+            if size < current.resize_percent {
+                current.resize_percent = size;
+                steps.push(current.clone());
+            }
+        }
+    }
+    steps
+}
+
+/// 진행 표시용 설정 설명: "화질 70, 15 FPS, 크기 90%"
+fn fit_step_text(step: &ExportOptions) -> String {
+    let fps = step.limit_fps.map_or("FPS 그대로".to_string(), |v| format!("{v} FPS"));
+    format!("화질 {}, {fps}, 크기 {}%", step.quality, step.resize_percent)
+}
+
+/// 목표 크기 안에 들어오도록 설정을 낮춰 저장한다 (GIF·WebP만).
+/// 먼저 녹화의 일부(고르게 뽑은 5구간, 약 1/5)만 저장해 보고 길이 비율로 전체 크기를 짐작해서,
+/// 목표의 95% 안에 드는 가장 덜 낮춘 설정을 반씩 좁혀 찾는다. 그 설정으로 실제로 저장해 보고
+/// 목표를 넘으면 한 단계 더 낮춘다(전체 저장은 최대 4번). 끝까지 넘어도 마지막 결과를 저장한다.
+/// 저장은 임시 폴더에 한 뒤 옮기므로, 중간에 실패해도 원래 있던 파일은 그대로다.
+pub fn export_fit(
+    frames: &[Frame],
+    path: &Path,
+    opt: &ExportOptions,
+    fit: &FitOptions,
+    s: &Settings,
+    progress: Progress,
+) -> Result<(Vec<PathBuf>, FitInfo)> {
+    if !matches!(opt.format, Format::Gif | Format::Webp) {
+        bail!("용량에 맞추기는 GIF와 WebP만 사용할 수 있습니다");
+    }
+    if frames.is_empty() {
+        bail!("저장할 프레임이 없습니다");
+    }
+    let steps = fit_ladder(frames, opt, fit);
+    let whole = frames.len() <= 40;
+    let sample = if whole {
+        frames.to_vec()
+    } else {
+        let len = (frames.len() / 25).max(2);
+        (0..5)
+            .flat_map(|i| {
+                let start = (frames.len() - len) * i / 4;
+                frames[start..start + len].iter().cloned()
+            })
+            .collect()
+    };
+    let duration = |fs: &[Frame]| -> u128 { fs.iter().map(|f| u128::from(f.delay_ms)).sum() };
+    let total_ms = duration(frames);
+    let sample_ms = duration(&sample);
+    let aim = u128::from(fit.target_bytes) * 95 / 100;
+
+    // 짐작은 진행률 0~50%. 반씩 좁히므로 대략 log2(단계 수)번 한다.
+    let rounds = (steps.len() as f32).log2().ceil().max(1.0);
+    let (mut low, mut high, mut tries) = (0usize, steps.len(), 0usize);
+    while low < high {
+        let mid = (low + high) / 2;
+        let step = &steps[mid];
+        progress((tries as f32 / rounds * 0.5).min(0.49), "예상 크기 계산 중");
+        let size = u128::from(estimate_size(&sample, step, s)?);
+        let estimate = if whole || sample_ms == 0 { size } else { size.saturating_mul(total_ms) / sample_ms };
+        tries += 1;
+        let msg = format!("{tries}번째 예상 - {} → 예상 {:.1}MB", fit_step_text(step), estimate as f64 / 1_000_000.0);
+        progress((tries as f32 / rounds * 0.5).min(0.5), &msg);
+        if estimate <= aim {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    let mut index = low.min(steps.len() - 1);
+
+    static NEXT_FIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = loop {
+        let n = NEXT_FIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("opencam_fit_{}_{n}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => break dir,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    // 실제 저장은 진행률 50~100%, 한 번에 12.5%씩
+    let result = (|| -> Result<(Vec<PathBuf>, FitInfo)> {
+        let temp = dir.join(format!("fit.{}", opt.format.ext()));
+        for attempt in 0..4 {
+            let step = &steps[index];
+            let message = format!("{}번째 저장 - {}", attempt + 1, fit_step_text(step));
+            let base = 0.5 + attempt as f32 * 0.125;
+            export(frames, &temp, step, s, &|p, _| progress(base + p.clamp(0.0, 1.0) * 0.125, &message))?;
+            let size = std::fs::metadata(&temp)?.len();
+            if size <= fit.target_bytes || index + 1 == steps.len() || attempt == 3 {
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent)?;
+                }
+                // 다른 드라이브로는 이름 바꾸기가 안 되므로 복사한다
+                if std::fs::rename(&temp, path).is_err() {
+                    std::fs::copy(&temp, path)?;
+                    std::fs::remove_file(&temp)?;
+                }
+                progress(1.0, "저장 완료");
+                let info = FitInfo {
+                    quality: step.quality,
+                    limit_fps: step.limit_fps,
+                    resize_percent: step.resize_percent,
+                    fitted: size <= fit.target_bytes,
+                    target_bytes: fit.target_bytes,
+                };
+                return Ok((vec![path.to_path_buf()], info));
+            }
+            index += 1;
+        }
+        unreachable!()
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 pub type Progress<'a> = &'a (dyn Fn(f32, &str) + Sync);
@@ -1027,6 +1200,8 @@ pub(crate) fn composite_gif(bytes: &[u8]) -> Vec<CompositedGifFrame> {
 mod tests {
     use super::*;
 
+    static ESTIMATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn frames(n: usize, delay: u32) -> Vec<Frame> {
         (0..n).map(|i| Frame::from_rgba(4, 4, &vec![(i * 40) as u8; 64], delay)).collect()
     }
@@ -1043,6 +1218,67 @@ mod tests {
             protect_colors: vec![],
             gif_fit_50fps: false,
         }
+    }
+
+    fn fit(target_bytes: u64) -> FitOptions {
+        FitOptions { target_bytes, allow_quality: true, allow_fps: true, allow_resize: true }
+    }
+
+    #[test]
+    fn fit_steps_follow_limits_and_permissions() {
+        let input = frames(10, 33);
+        let mut opt = opts(Format::Gif);
+        opt.quality = 85;
+        opt.limit_fps = Some(15);
+        let steps = fit_ladder(&input, &opt, &fit(100));
+        assert_eq!(steps.iter().map(|s| s.quality).collect::<Vec<_>>(), vec![85, 75, 65, 55, 50, 50, 50, 50, 50, 50, 50]);
+        assert_eq!(steps[5].limit_fps, Some(10));
+        assert_eq!(steps[6..].iter().map(|s| s.resize_percent).collect::<Vec<_>>(), vec![90, 80, 70, 60, 50]);
+        let none = FitOptions { allow_quality: false, allow_fps: false, allow_resize: false, ..fit(100) };
+        assert_eq!(fit_ladder(&input, &opt, &none).len(), 1);
+        opt.quality = 45;
+        let quality_only = FitOptions { allow_quality: true, ..none };
+        assert_eq!(fit_ladder(&input, &opt, &quality_only).len(), 1);
+    }
+
+    #[test]
+    fn fit_saves_and_reports_actual_size() {
+        let _guard = ESTIMATE_TEST_LOCK.lock().unwrap();
+        let input: Vec<Frame> = (0..60).map(|i| {
+            let px: Vec<u8> = (0..32 * 24).flat_map(|p| {
+                let v = ((p * 73 + i * 41 + (p * i * 17)) % 256) as u8;
+                [v, v.wrapping_mul(7), v.wrapping_add(43), 255]
+            }).collect();
+            Frame::from_rgba(32, 24, &px, 33)
+        }).collect();
+        let opt = opts(Format::Webp);
+        let s = Settings::default();
+        let path = std::env::temp_dir().join(format!("opencam_fit_test_{}.webp", std::process::id()));
+        let (_, generous) = export_fit(&input, &path, &opt, &fit(u64::MAX), &s, &|_, _| {}).unwrap();
+        assert!(generous.fitted && generous.quality == opt.quality && path.exists());
+        let largest = std::fs::metadata(&path).unwrap().len();
+        let (_, tiny) = export_fit(&input, &path, &opt, &fit(1), &s, &|_, _| {}).unwrap();
+        let smallest = std::fs::metadata(&path).unwrap().len();
+        assert!(!tiny.fitted && tiny.quality == 50 && tiny.resize_percent == 50 && path.exists());
+        assert!(smallest < largest);
+        let target = (largest + smallest) / 2;
+        let (_, medium) = export_fit(&input, &path, &opt, &fit(target), &s, &|_, _| {}).unwrap();
+        assert!(!medium.fitted || std::fs::metadata(&path).unwrap().len() <= target);
+        let prefix = format!("opencam_fit_{}_", std::process::id());
+        assert!(!std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(&prefix)));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn fit_gif_and_reject_other_formats() {
+        let _guard = ESTIMATE_TEST_LOCK.lock().unwrap();
+        let input = frames(4, 100);
+        let path = std::env::temp_dir().join(format!("opencam_fit_test_{}.gif", std::process::id()));
+        let s = Settings::default();
+        let (_, info) = export_fit(&input, &path, &opts(Format::Gif), &fit(1_000_000), &s, &|_, _| {}).unwrap();
+        assert!(info.fitted && info.quality == 80 && path.exists());
+        assert!(export_fit(&input, &path, &opts(Format::Png), &fit(100), &s, &|_, _| {}).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[derive(Default)]
@@ -1183,6 +1419,7 @@ mod tests {
 
     #[test]
     fn estimate_png_sequence_counts_all_files_and_cleans_up() {
+        let _guard = ESTIMATE_TEST_LOCK.lock().unwrap();
         // 예전에는 크기 0으로 나오고 임시 폴더에 PNG가 프레임 수만큼 남았다
         let s = Settings::default();
         let input = frames(3, 100);

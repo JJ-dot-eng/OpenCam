@@ -41,6 +41,11 @@ interface Props {
 export default function SaveDialog({ settings, frames, onClose, onSaved, onDeleted, onNewRecording }: Props) {
   const [format, setFormat] = useState<Format>("gif");
   const [quality, setQuality] = useState(settings.gifQuality);
+  const [fitBySize, setFitBySize] = useState(settings.fitBySize);
+  const [targetMb, setTargetMb] = useState(settings.fitTargetMb);
+  const [allowQuality, setAllowQuality] = useState(settings.fitAllowQuality);
+  const [allowFps, setAllowFps] = useState(settings.fitAllowFps);
+  const [allowResize, setAllowResize] = useState(settings.fitAllowResize);
   const [path, setPath] = useState("");
   const [limitFps, setLimitFps] = useState(settings.limitFps);
   const [limitFpsValue, setLimitFpsValue] = useState(settings.limitFpsValue);
@@ -91,6 +96,8 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
 
   const needsFfmpeg = format === "mp4" || format === "webm" || format === "avif";
   const hasQuality = format !== "apng" && format !== "png";
+  const canFit = format === "gif" || format === "webp";
+  const fitting = canFit && fitBySize;
   const tooFast = format === "gif" && !limitFps && frames.some((f) => f.delayMs < 20);
   const working = progress !== null && !done && !error;
 
@@ -139,7 +146,10 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
           return;
         }
       }
-      const result = await api.exportProject(o, target);
+      const safeTarget = Math.max(1, Math.min(4000, Math.round(targetMb) || 1));
+      const result = fitting
+        ? await api.exportProjectFit(o, { targetBytes: safeTarget * 1_000_000, allowQuality, allowFps, allowResize }, target)
+        : await api.exportProject(o, target);
       setDone(result);
       onSaved();
       // 이번에 고른 옵션을 다음 저장의 기본값으로
@@ -158,6 +168,11 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
       await api.setSettings({
         ...settings,
         ...q,
+        fitBySize,
+        fitTargetMb: safeTarget,
+        fitAllowQuality: allowQuality,
+        fitAllowFps: allowFps,
+        fitAllowResize: allowResize,
         limitFps,
         limitFpsValue: o.limitFps ?? settings.limitFpsValue,
         skipSimilar,
@@ -181,6 +196,18 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         <p className="saved-path">{done.paths[0]}</p>
         {done.paths.length > 1 && <p className="hint">PNG {done.paths.length}장을 저장했습니다</p>}
         {done.size > 0 && <p className="hint">파일 크기 {formatBytes(done.size)}</p>}
+        {done.fit && (
+          <p>
+            목표 {done.fit.targetBytes / 1_000_000}MB → 화질 {done.fit.quality},{" "}
+            {done.fit.limitFps ? `${done.fit.limitFps} FPS` : "FPS 그대로"}, 크기 {done.fit.resizePercent}%로 저장했습니다
+          </p>
+        )}
+        {done.fit && !done.fit.fitted && (
+          <p className="warn">
+            모든 설정을 낮춰도 목표 {done.fit.targetBytes / 1_000_000}MB보다 큽니다. 구간을 줄이거나 ‘줄여도 되는 것’을 더
+            켜 보세요.
+          </p>
+        )}
         <div className="col">
           <button className="primary" onClick={() => api.revealFile(done.paths[0]).catch((e) => setError(errText(e)))}>
             📂 폴더 열기
@@ -244,7 +271,38 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
         <p className="error">ffmpeg.exe를 찾지 못했습니다. ffmpeg를 설치하거나 OpenCam 폴더에 넣어 주세요.</p>
       )}
 
-      {hasQuality && (
+      {/* 용량에 맞추기 (GIF·WebP): 목표 크기를 정하면 화질·FPS·크기를 알아서 낮춘다 */}
+      {canFit && (
+        <div className="row">
+          <span>기준</span>
+          <button className={!fitBySize ? "on" : ""} disabled={working} onClick={() => setFitBySize(false)}>
+            화질 직접 정하기
+          </button>
+          <button className={fitBySize ? "on" : ""} disabled={working} onClick={() => setFitBySize(true)}>
+            용량에 맞추기
+          </button>
+        </div>
+      )}
+      {fitting && (
+        <>
+          <div className="row">
+            <NumField label="목표" value={targetMb} min={1} max={4000} suffix="MB" disabled={working} onChange={setTargetMb} />
+            {[5, 10, 20, 50].map((n) => (
+              <button key={n} className={targetMb === n ? "on" : ""} disabled={working} onClick={() => setTargetMb(n)}>
+                {n}
+              </button>
+            ))}
+          </div>
+          <div className="row">
+            <span>줄여도 되는 것:</span>
+            <Check label="화질" checked={allowQuality} onChange={setAllowQuality} disabled={working} />
+            <Check label="FPS" checked={allowFps} onChange={setAllowFps} disabled={working} />
+            <Check label="이미지 크기" checked={allowResize} onChange={setAllowResize} disabled={working} />
+          </div>
+          <p className="hint">화질 → FPS → 이미지 크기 순으로 낮춰 목표 안에 맞춥니다</p>
+        </>
+      )}
+      {hasQuality && !fitting && (
         <label className="field">
           <span>화질</span>
           <input
@@ -315,16 +373,18 @@ export default function SaveDialog({ settings, frames, onClose, onSaved, onDelet
       {error && <p className="error">{error}</p>}
 
       <div className="modal-foot">
-        <button onClick={calc} disabled={working || (needsFfmpeg && !ffmpeg)}>
-          예상 크기 계산
-        </button>
-        {estimate && <span className="hint">{estimate}</span>}
+        {!fitting && (
+          <button onClick={calc} disabled={working || (needsFfmpeg && !ffmpeg)}>
+            예상 크기 계산
+          </button>
+        )}
+        {!fitting && estimate && <span className="hint">{estimate}</span>}
         <span className="grow" />
         <button onClick={onClose} disabled={working}>
           취소
         </button>
         <button className="primary" onClick={save} disabled={working || !path || (needsFfmpeg && !ffmpeg)}>
-          {working ? "저장 중…" : "저장"}
+          {working ? "저장 중…" : fitting ? "용량에 맞춰 저장" : "저장"}
         </button>
       </div>
     </Modal>

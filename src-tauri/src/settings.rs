@@ -87,6 +87,11 @@ pub struct Settings {
     pub transparent_replace_color: u32,
 
     // 저장 시 파일 크기 줄이기
+    pub fit_by_size: bool,
+    pub fit_target_mb: u32,
+    pub fit_allow_quality: bool,
+    pub fit_allow_fps: bool,
+    pub fit_allow_resize: bool,
     pub limit_fps: bool,
     pub limit_fps_value: u32,
     pub skip_similar: bool,
@@ -192,6 +197,11 @@ impl Default for Settings {
             mp4_replace_transparent: false,
             transparent_replace_color: 0xffffff,
 
+            fit_by_size: false,
+            fit_target_mb: 20,
+            fit_allow_quality: true,
+            fit_allow_fps: true,
+            fit_allow_resize: true,
             limit_fps: false,
             limit_fps_value: 20,
             skip_similar: false,

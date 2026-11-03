@@ -890,6 +890,7 @@ struct ExportProgress {
 struct ExportResult {
     paths: Vec<PathBuf>,
     size: u64,
+    fit: Option<export::FitInfo>,
 }
 
 /// 이번 저장으로 덮어쓰게 될 파일을 찾는다.
@@ -928,7 +929,26 @@ async fn export_project(app: AppHandle, opts: ExportOptions, path: String) -> Cm
     .map_err(|e| format!("{e:#}"))?;
     let size = paths.iter().map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum();
     app.state::<AppState>().project.lock().dirty = false;
-    Ok(ExportResult { paths, size })
+    Ok(ExportResult { paths, size, fit: None })
+}
+
+#[tauri::command]
+async fn export_project_fit(app: AppHandle, opts: ExportOptions, fit: export::FitOptions, path: String) -> CmdResult<ExportResult> {
+    let (frames, s) = {
+        let state = app.state::<AppState>();
+        let frames = state.project.lock().frames.clone();
+        let s = state.settings.lock().clone();
+        (frames, s)
+    };
+    let h = app.clone();
+    let (paths, fit) = tauri::async_runtime::spawn_blocking(move || {
+        export::export_fit(&frames, Path::new(&path), &opts, &fit, &s, &|progress, msg| {
+            let _ = h.emit("export-progress", ExportProgress { progress, message: msg.into() });
+        })
+    }).await.map_err(err)?.map_err(|e| format!("{e:#}"))?;
+    let size = paths.iter().map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum();
+    app.state::<AppState>().project.lock().dirty = false;
+    Ok(ExportResult { paths, size, fit: Some(fit) })
 }
 
 #[tauri::command]
@@ -1959,6 +1979,7 @@ pub fn run() {
             pick_folder,
             export_conflicts,
             export_project,
+            export_project_fit,
             estimate_size,
             has_ffmpeg,
             reveal_file,
