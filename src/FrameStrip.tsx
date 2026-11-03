@@ -1,8 +1,10 @@
 // 아래쪽 프레임 목록. 프레임이 수천 장이어도 보이는 칸만 그린다.
 // 썸네일을 끌어 다른 자리에 놓으면 프레임을 옮긴다 (선택한 여러 장이면 함께).
+// 도구 화면이 열려 있으면 썸네일 위에 적용 범위 띠를 그린다. 양 끝을 끌면 범위가, 가운데를 끌면 자리가 바뀐다.
 
 import { useEffect, useRef, useState } from "react";
 import { FrameInfo, frameUrl } from "./api";
+import { Band, BandEdge, dragBand } from "./timeline";
 
 export type ThumbSize = "small" | "medium" | "large";
 /** 썸네일 칸 크기(px). w는 간격 8px을 뺀 칸 너비. 작게면 한 화면에 보통의 약 1.5배가 들어간다 */
@@ -24,12 +26,16 @@ interface Props {
   onMenu: (i: number, x: number, y: number) => void;
   /** 끌어 놓기: i번을 잡고 to번 자리(그 프레임 앞, 맨 뒤는 프레임 수)에 놓았다 */
   onMove: (i: number, to: number) => void;
+  /** 열린 도구의 적용 범위 (없으면 띠 줄을 그리지 않는다) */
+  band?: Band | null;
 }
 
 /** 이만큼(px) 움직여야 끌기로 본다. 그냥 누르기와 구분하려고 */
 const DRAG_START = 6;
+/** 범위 띠 줄 높이(px). 썸네일은 그만큼 아래로 내려간다 */
+const TRACK = 24;
 
-export default function FrameStrip({ frames, current, sel, onSelect, threeDigit, size, onMenu, onMove }: Props) {
+export default function FrameStrip({ frames, current, sel, onSelect, threeDigit, size, onMenu, onMove, band }: Props) {
   const { w: itemW, h: itemH } = THUMB[size];
   const ITEM = itemW + 8;
   const ref = useRef<HTMLDivElement>(null);
@@ -66,6 +72,38 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
       setDropAt(null);
       if (to !== null) onMove(i, to);
       else if (keepSel) onSelect(i, { ctrlKey: false, shiftKey: false });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  /** 범위 띠의 끝이나 가운데를 잡고 끈다. 마우스 밑 프레임 번호로 계산하고, 바뀔 때마다 바로 알린다. */
+  const onBandDown = (edge: BandEdge, e: React.MouseEvent) => {
+    const el = ref.current;
+    if (!band || !el || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const orig = { start: band.start, end: band.end };
+    const { onChange, minLen } = band;
+    const at = (x: number) => {
+      const r = el.getBoundingClientRect();
+      return Math.max(0, Math.min(frames.length - 1, Math.floor((x - r.left + el.scrollLeft) / ITEM)));
+    };
+    const from = at(e.clientX);
+    let last = orig;
+    const move = (ev: MouseEvent) => {
+      const r = el.getBoundingClientRect();
+      if (ev.clientX < r.left + 40) el.scrollLeft -= 20;
+      else if (ev.clientX > r.right - 40) el.scrollLeft += 20;
+      const i = at(ev.clientX);
+      const next = dragBand(edge, orig, edge === "move" ? i - from : i, frames.length, minLen);
+      if (next.start === last.start && next.end === last.end) return;
+      last = next;
+      onChange(next.start, next.end, edge);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -112,7 +150,7 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
       <div
         key={f.id}
         className={`strip-item ${selected.has(i) ? "sel" : ""} ${i === current ? "cur" : ""}`}
-        style={{ left: i * ITEM, width: itemW, height: itemH }}
+        style={{ left: i * ITEM, top: band ? 6 + TRACK : undefined, width: itemW, height: itemH }}
         onMouseDown={(e) => onItemDown(i, e)}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -132,11 +170,42 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
     start += f.delayMs;
   }
 
+  // 띠는 프레임 칸에 맞춰 그린다 (프레임이 줄어든 직후에도 목록 안으로)
+  const last1 = frames.length - 1;
+  const bs = band ? Math.max(0, Math.min(last1, band.start)) : 0;
+  const be = band ? Math.max(bs, Math.min(last1, band.end)) : 0;
+  const box = (a: number, b: number) => ({ left: a * ITEM, width: (b - a + 1) * ITEM - 8 });
+
   return (
-    <div className="strip" ref={ref} onWheel={onWheel} style={{ height: itemH + 16 }}>
+    <div className="strip" ref={ref} onWheel={onWheel} style={{ height: itemH + 16 + (band ? TRACK : 0) }}>
       <div className="strip-inner" style={{ width: frames.length * ITEM }}>
+        {band && (
+          <div className="strip-track">
+            <div
+              className="band"
+              style={box(bs, be)}
+              onMouseDown={(e) => onBandDown("move", e)}
+              title="양 끝을 끌어 범위를 바꾸고, 가운데를 끌어 옮깁니다"
+            >
+              {band.parts?.map((p, k) => (
+                <div
+                  key={k}
+                  className="band-part"
+                  style={{ left: (Math.max(bs, p.start) - bs) * ITEM, width: (Math.min(be, p.end) - Math.max(bs, p.start) + 1) * ITEM - 8 }}
+                  title={p.label}
+                />
+              ))}
+              {band.marks?.map((i) => (
+                <div key={i} className="band-mark" style={{ left: (i - bs) * ITEM, width: itemW }} />
+              ))}
+              <span className="band-label">{band.label}</span>
+              <div className="band-edge start" onMouseDown={(e) => onBandDown("start", e)} />
+              <div className="band-edge end" onMouseDown={(e) => onBandDown("end", e)} />
+            </div>
+          </div>
+        )}
         {items}
-        {dropAt !== null && <div className="strip-drop" style={{ left: dropAt * ITEM - 5 }} />}
+        {dropAt !== null && <div className="strip-drop" style={{ left: dropAt * ITEM - 5, top: band ? 4 + TRACK : undefined }} />}
       </div>
     </div>
   );

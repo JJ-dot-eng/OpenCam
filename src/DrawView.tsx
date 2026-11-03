@@ -192,7 +192,7 @@ export default function DrawView({ frame, scale, onApply, onCancel }: Props) {
         desc="미리보기 위에 마우스로 그립니다."
         foot={
           <PanelFoot
-            scope={<ScopePicker value={scope} onChange={setScope} span />}
+            scope={<ScopePicker value={scope} onChange={setScope} span name="그리기" />}
             summary={strokes.length > 0 && `그린 획 ${strokes.length}개`}
             disabledReason={strokes.length === 0 ? "먼저 미리보기 위에 그리세요" : null}
             onCancel={onCancel}

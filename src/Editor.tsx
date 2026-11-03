@@ -70,7 +70,8 @@ import "./editor.css";
 import { alertAsk, AskHost, confirmAsk } from "./ask";
 import { SidePanelTarget } from "./SidePanel";
 import { ModalInPanel } from "./dialogs";
-import { DirtyReport, FrameContext } from "./Panel";
+import { DirtyReport, FrameContext, TimelineContext, TimelineCtx } from "./Panel";
+import { Band } from "./timeline";
 import { checkForUpdate } from "./updater";
 
 type Dialog = null | "reduce" | "resize" | "delay" | "cut" | "save" | "settings" | "transition" | "summary" | "upscale" | "newBlank" | "collage" | "manage" | "exportFrames";
@@ -121,6 +122,8 @@ export default function Editor() {
   const [zoom, setZoom] = useState<number | "fit">("fit");
   const [dialog, setDialog] = useState<Dialog>(null);
   const [mode, setModeRaw] = useState<Mode>(null);
+  /** 열린 도구가 알려 준 적용 범위 (썸네일 줄 위 띠) */
+  const [band, setBand] = useState<Band | null>(null);
   const [busy, setBusy] = useState(false);
   const appendGuard = useRef(createAppendGuard());
   const [busyText, setBusyText] = useState("처리 중…");
@@ -604,10 +607,26 @@ export default function Editor() {
   /** 오른쪽 패널은 왼쪽 도구를 골랐을 때만 (그 도구의 세부 설정) */
   const showSide = !empty && (mode !== null || (dialog !== null && PANEL_DIALOGS.includes(dialog)));
   const frameCtx = useMemo(() => ({ current, total: frames.length, sel }), [current, frames.length, sel]);
+  const timelineCtx = useMemo<TimelineCtx>(
+    () => ({
+      delays: frames.map((f) => f.delayMs),
+      setBand,
+      selectRange: (a, b) => {
+        setSel(Array.from({ length: b - a + 1 }, (_, k) => a + k));
+        setAnchor(a);
+      },
+      setCurrent: (i) => {
+        setPlaying(false);
+        setCurrent(i);
+      },
+    }),
+    [frames],
+  );
 
   return (
     <SidePanelTarget.Provider value={sideEl}>
     <FrameContext.Provider value={frameCtx}>
+    <TimelineContext.Provider value={timelineCtx}>
     <DirtyReport.Provider value={reportDirty}>
     <div className="ed">
       <AskHost />
@@ -873,6 +892,7 @@ export default function Editor() {
               threeDigit={settings?.frameTime3digit ?? false}
               size="medium"
               onMove={moveFrames}
+              band={band}
               onMenu={(i, x, y) => {
                 if (!sel.includes(i)) selectFrame(i, { ctrlKey: false, shiftKey: false });
                 setMenu({ x, y });
@@ -1147,6 +1167,7 @@ export default function Editor() {
       )}
     </div>
     </DirtyReport.Provider>
+    </TimelineContext.Provider>
     </FrameContext.Provider>
     </SidePanelTarget.Provider>
   );

@@ -12,7 +12,8 @@ import {
 } from "./api";
 
 import SidePanel from "./SidePanel";
-import { Field, FrameContext, NumInput, PanelFoot, Section, Segmented, Slider, useReportDirty } from "./Panel";
+import { bandSelect, Field, FrameContext, NumInput, PanelFoot, Section, Segmented, Slider, TimelineContext, useBand, useReportDirty } from "./Panel";
+import { framesBackMs, framesForMs, spanText } from "./timeline";
 
 /** true면 Modal을 창 가운데가 아니라 편집 창 오른쪽 패널에 그린다 (왼쪽 도구 목록에서 연 도구) */
 export const ModalInPanel = createContext(false);
@@ -569,6 +570,17 @@ export function TransitionDialog({
   const span = selCount > 1;
   const a = span ? Math.min(...f.sel) + 1 : 1;
   const b = span ? Math.max(...f.sel) + 1 : f.total;
+  // 썸네일 줄 띠: 효과가 걸리는 부분(처음 또는 마지막 ms)을 진하게
+  const t = useContext(TimelineContext);
+  const s = { start: a - 1, end: b - 1 };
+  const atStart = kind === "fadeIn" || kind === "flash";
+  const ems = Math.max(10, Math.round(ms) || 0);
+  const part = atStart
+    ? { start: s.start, end: Math.min(s.end, framesForMs(t.delays, s.start, ems)) }
+    : { start: framesBackMs(t.delays, s.end, ems, s.start), end: s.end };
+  useBand({ ...s, label: `화면 전환 · ${spanText(t.delays, s)}`, parts: [{ ...part, label: `효과 ${ems}ms` }], minLen: 2 }, (x, y, edge) =>
+    bandSelect(t, x, y, edge),
+  );
   return (
     <Modal
       title="화면 전환"

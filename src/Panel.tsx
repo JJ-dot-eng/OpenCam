@@ -1,9 +1,10 @@
 // 오른쪽 도구 패널이 함께 쓰는 부품: 섹션, 이름표+입력 줄, 단위가 붙은 숫자칸, 색 칸, 고르기 버튼 묶음,
 // 적용 범위, 바닥(결과 요약·취소·실행). 모든 도구 패널이 같은 높이·간격·단위 표기를 쓰게 한다.
 
-import { createContext, ReactNode, useContext, useEffect, useState } from "react";
+import { createContext, ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { IconChevronDown, IconChevronRight } from "@tabler/icons-react";
 import { errText } from "./api";
+import { Band, BandEdge, spanText } from "./timeline";
 
 /** 지금 편집 상황: 보고 있는 프레임(0부터), 전체 장수, 고른 프레임 */
 export interface FrameCtx {
@@ -20,6 +21,30 @@ export function useReportDirty(dirty: boolean) {
   const report = useContext(DirtyReport);
   useEffect(() => report(dirty), [dirty, report]);
   useEffect(() => () => report(false), [report]);
+}
+
+/** 썸네일 줄의 적용 범위 띠와 이어 주는 것 (편집 창이 준다) */
+export interface TimelineCtx {
+  /** 프레임마다 시간(ms) */
+  delays: number[];
+  setBand: (b: Band | null) => void;
+  /** start~end를 고른 프레임으로 */
+  selectRange: (start: number, end: number) => void;
+  setCurrent: (i: number) => void;
+}
+export const TimelineContext = createContext<TimelineCtx>({ delays: [], setBand: () => {}, selectRange: () => {}, setCurrent: () => {} });
+
+/** 열린 도구의 적용 범위를 썸네일 줄 위에 띠로 보여 준다. 도구가 닫히면 띠도 사라진다. */
+export function useBand(band: Omit<Band, "onChange"> | null, onChange: Band["onChange"]) {
+  const { setBand } = useContext(TimelineContext);
+  const cb = useRef(onChange);
+  cb.current = onChange;
+  const key = band ? JSON.stringify(band) : "";
+  useEffect(() => {
+    setBand(band ? { ...band, onChange: (a, b, edge) => cb.current(a, b, edge) } : null);
+    // 띠 내용(key)이 바뀔 때만 다시 알린다
+  }, [key, setBand]);
+  useEffect(() => () => setBand(null), [setBand]);
 }
 
 /** 설정이 바뀌면 잠깐(120ms) 기다렸다가 미리보기 PNG를 받아 Blob URL로 넘긴다. load가 null이면 받지 않는다.
@@ -290,8 +315,41 @@ export function scopeText(scope: Scope, f: FrameCtx, span: boolean): string {
   return `전체 ${f.total}장에 적용`;
 }
 
-export function ScopePicker({ value, onChange, span }: { value: Scope; onChange: (s: Scope) => void; span: boolean }) {
+/** 범위가 덮는 프레임 구간 (떨어진 프레임을 골랐으면 처음~끝) */
+export function scopeSpan(scope: Scope, f: FrameCtx): { start: number; end: number } {
+  if (scope === "current") return { start: f.current, end: f.current };
+  if (scope === "selection" && f.sel.length > 0) return { start: Math.min(...f.sel), end: Math.max(...f.sel) };
+  return { start: 0, end: Math.max(0, f.total - 1) };
+}
+
+/** 띠를 끌었을 때: 그 구간을 고르고, 잡은 쪽 끝 프레임을 보여 준다 */
+export function bandSelect(t: TimelineCtx, start: number, end: number, edge: BandEdge) {
+  t.selectRange(start, end);
+  t.setCurrent(edge === "end" ? end : start);
+}
+
+export function ScopePicker({
+  value,
+  onChange,
+  span,
+  name,
+}: {
+  value: Scope;
+  onChange: (s: Scope) => void;
+  span: boolean;
+  /** 썸네일 줄 띠에 쓰는 도구 이름 */
+  name: string;
+}) {
   const f = useContext(FrameContext);
+  const t = useContext(TimelineContext);
+  const s = scopeSpan(value, f);
+  // 필터처럼 고른 프레임만 바꾸는 도구는 떨어진 프레임을 따로 표시한다
+  const gaps = !span && value === "selection" && f.sel.length > 0 && f.sel.length !== s.end - s.start + 1;
+  const label = gaps ? `${name} · 선택한 ${f.sel.length}장` : `${name} · ${spanText(t.delays, s)}`;
+  useBand({ ...s, label, marks: gaps ? f.sel : undefined }, (a, b, edge) => {
+    bandSelect(t, a, b, edge);
+    onChange("selection");
+  });
   const noSel = f.sel.length === 0 ? "프레임 목록에서 프레임을 먼저 고르세요 (Ctrl·Shift로 여러 장)" : undefined;
   return (
     <div className="pscope">

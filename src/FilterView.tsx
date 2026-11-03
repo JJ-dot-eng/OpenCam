@@ -433,7 +433,7 @@ export default function FilterView({ frame, scale, onApply, onCancel, onError }:
         desc={`여러 필터를 함께 켤 수 있습니다. 미리보기는 지금 프레임(${frames.current + 1}번)으로 보여 줍니다.`}
         foot={
           <PanelFoot
-            scope={<ScopePicker value={scope} onChange={setScope} span={false} />}
+            scope={<ScopePicker value={scope} onChange={setScope} span={false} name="필터" />}
             summary={onNames.length > 0 && `켠 필터 ${onNames.length}개: ${onNames.join(", ")}`}
             disabledReason={why}
             onCancel={onCancel}

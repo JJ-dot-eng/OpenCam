@@ -532,7 +532,7 @@ export default function InsertView({ frame, scale, onApply, onCancel, onError }:
         desc="미리보기에서 개체를 끌어 옮길 수 있습니다."
         foot={
           <PanelFoot
-            scope={<ScopePicker value={scope} onChange={setScope} span />}
+            scope={<ScopePicker value={scope} onChange={setScope} span name="텍스트 · 이미지" />}
             summary={visible > 0 && `덧씌울 개체 ${visible}개`}
             disabledReason={why}
             onCancel={onCancel}

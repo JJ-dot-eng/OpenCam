@@ -605,6 +605,82 @@ input[type="range"] {
   pointer-events: none;
 }
 
+/* 도구 화면의 적용 범위 띠 (썸네일 위 한 줄) */
+.strip-track {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  height: 20px;
+}
+
+.band {
+  position: absolute;
+  top: 0;
+  height: 20px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border: 1px solid var(--accent);
+  box-sizing: border-box;
+  cursor: grab;
+}
+
+.band:active {
+  cursor: grabbing;
+}
+
+.band-part {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  pointer-events: none;
+}
+
+.band-mark {
+  position: absolute;
+  bottom: 1px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* 띠가 길어 앞이 스크롤로 가려져도 이름은 보이게 */
+.band-label {
+  position: sticky;
+  left: 0;
+  display: inline-block;
+  max-width: 100%;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.band-edge {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 8px;
+  background: var(--accent);
+  cursor: ew-resize;
+}
+
+.band-edge.start {
+  left: -1px;
+  border-radius: 4px 0 0 4px;
+}
+
+.band-edge.end {
+  right: -1px;
+  border-radius: 0 4px 4px 0;
+}
+
 .strip-item.sel .strip-meta span:first-child {
   color: var(--accent);
   font-weight: 600;

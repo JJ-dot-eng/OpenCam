@@ -1,10 +1,11 @@
 // 줌 애니메이션 화면: 확대할 영역을 고르면, 지금 프레임부터 그 영역이 커지며 보였다가 돌아간다.
 
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { api, FrameInfo, frameUrl, Region, ZoomFx, ZoomScale } from "./api";
 import { Check, isModalOpen } from "./dialogs";
 import SidePanel from "./SidePanel";
-import { Field, NumInput, PanelFoot, Section, Slider, usePngPreview, useReportDirty } from "./Panel";
+import { Field, NumInput, PanelFoot, Section, Slider, TimelineContext, useBand, usePngPreview, useReportDirty } from "./Panel";
+import { framesBackMs, framesForMs, spanMs, spanText } from "./timeline";
 
 const SCALES: [ZoomScale, string][] = [
   ["goodFit", "적당한 크기"],
@@ -64,6 +65,18 @@ export default function ZoomView({ frame, index, remainMs, scale, onApply, onCan
   useReportDirty(key !== startKey.current);
   const actualMs = Math.min(zoom.totalMs, remainMs);
   const valid = Number.isFinite(totalSec) && totalSec > 0;
+
+  // 썸네일 줄 띠: 지금 프레임부터 총 시간만큼, 커지기·돌아오기 부분은 진하게.
+  // 띠를 끌면 시작 프레임(지금 프레임)과 총 시간이 바뀐다.
+  const t = useContext(TimelineContext);
+  const span = { start: index, end: framesForMs(t.delays, index, actualMs) };
+  const parts = [];
+  if (zoom.introMs > 0) parts.push({ start: span.start, end: Math.min(span.end, framesForMs(t.delays, span.start, zoom.introMs)), label: `커지기 ${zoom.introMs}ms` });
+  if (zoom.outroMs > 0) parts.push({ start: framesBackMs(t.delays, span.end, zoom.outroMs, span.start), end: span.end, label: `돌아오기 ${zoom.outroMs}ms` });
+  useBand({ ...span, label: `줌 · ${spanText(t.delays, span)}`, parts }, (a, b) => {
+    if (a !== index) t.setCurrent(a);
+    setTotalSec(spanMs(t.delays, a, b) / 1000);
+  });
 
   // 결과 미리보기 (가장 크게 확대된 순간)
   usePngPreview(showResult ? () => api.zoomPreview(frame.id, zoom) : null, setPreview, onError, [key, frame.id, showResult]);
