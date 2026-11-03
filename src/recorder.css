@@ -35,8 +35,10 @@ body,
   opacity: 0.55;
 }
 
+/* 툴바가 틀 위에 겹쳐도(창에 맞추기에서 떼어 둔 툴바) 툴바가 위에 오고 눌린다 */
 .rec-toolbar {
   position: absolute;
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -76,7 +78,7 @@ body,
   border-radius: 0 0 6px 6px;
   background: var(--frame);
   cursor: pointer;
-  z-index: 2;
+  z-index: 3;
 }
 
 .rec-toolbar svg {
@@ -364,16 +366,19 @@ body,
   cursor: pointer;
 }
 
+/* 틀 안쪽은 비어 있으니 클릭을 막지 않는다 (위에 띄운 툴바가 눌리게). 테두리 잡는 곳만 받는다. */
 .rec-frame {
   position: absolute;
   box-sizing: border-box;
   border-style: solid;
   border-color: var(--frame);
+  pointer-events: none;
 }
 
 /* 테두리(두께 --b) 위에 겹쳐서 잡는 곳. 구멍 안쪽은 창이 잘려 있어 잡을 수 없다. */
 .grip {
   position: absolute;
+  pointer-events: auto;
 }
 
 .grip.n,
