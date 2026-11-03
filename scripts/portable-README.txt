@@ -1,5 +1,5 @@
 OpenCam {version} (portable)
-https://github.com/JJ-dot-eng/OpenCam
+https://github.com/OpenCam-dot/OpenCam
 
 Run OpenCam.exe. Settings are stored in %APPDATA%\OpenCam.
 MP4/WebM/AVIF saving needs ffmpeg.exe (put it next to OpenCam.exe, or install it into PATH).

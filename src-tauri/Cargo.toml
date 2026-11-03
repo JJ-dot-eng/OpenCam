@@ -4,7 +4,7 @@ version = "0.1.10"
 description = "OpenCam - screen to GIF recorder and editor"
 authors = ["JJ"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/JJ-dot-eng/OpenCam"
+repository = "https://github.com/OpenCam-dot/OpenCam"
 edition = "2024"
 
 [lib]

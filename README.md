@@ -6,7 +6,7 @@
 
 ## 다운로드
 
-[Releases](https://github.com/JJ-dot-eng/OpenCam/releases) 페이지에서 받으세요.
+[Releases](https://github.com/OpenCam-dot/OpenCam/releases) 페이지에서 받으세요.
 
 - `OpenCam_x.y.z_x64-setup.exe`: 설치 파일. 시작 메뉴에 등록되고 "앱 및 기능"에서 지울 수 있습니다.
 - `OpenCam_x.y.z_x64_portable.zip`: 설치 없이 압축만 풀어 실행하는 버전.

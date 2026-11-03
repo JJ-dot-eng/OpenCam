@@ -4,8 +4,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { alertAsk, confirmAsk } from "./ask";
 
-export const REPO_URL = "https://github.com/JJ-dot-eng/OpenCam";
-const LATEST_API = "https://api.github.com/repos/JJ-dot-eng/OpenCam/releases/latest";
+export const REPO_URL = "https://github.com/OpenCam-dot/OpenCam";
+const LATEST_API = "https://api.github.com/repos/OpenCam-dot/OpenCam/releases/latest";
 
 /** "v0.1.10" → [0, 1, 10] */
 function parts(v: string): number[] {
