@@ -6,6 +6,7 @@
 // 썸네일 바로 위에는 효과 기록을 효과 종류마다 한 줄씩 그린다(도구를 열지 않아도). 기록 띠를 누르면 그 구간을 고른다.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Icon, IconAdjustmentsHorizontal, IconPencil, IconTransitionRight, IconTypography, IconZoomInArea } from "@tabler/icons-react";
 import { FrameInfo, frameUrl } from "./api";
 import { Band, BandEdge, dragBand, effectRows, runs, spanText } from "./timeline";
 
@@ -40,7 +41,15 @@ const DRAG_START = 6;
 /** 범위 띠 줄 높이(px). 썸네일은 그만큼 아래로 내려간다 */
 const TRACK = 24;
 /** 효과 기록 한 줄 높이(px) */
-const ROW = 16;
+const ROW = 19;
+/** 효과 기록 띠에 붙는 아이콘 (왼쪽 도구 목록과 같은 것) */
+const HIST_ICON: Record<string, Icon> = {
+  filter: IconAdjustmentsHorizontal,
+  draw: IconPencil,
+  insert: IconTypography,
+  transition: IconTransitionRight,
+  zoom: IconZoomInArea,
+};
 /** Ctrl+휠 한 번에 바뀌는 배율 */
 const ZOOM_STEP = 1.25;
 
@@ -320,7 +329,8 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={() => onPickRange?.(x.start, x.end)}
                   >
-                    {/* 띠마다 효과 이름 (좁으면 잘리고, 마우스를 대면 전체가 보인다) */}
+                    {/* 띠마다 아이콘과 효과 이름 (좁으면 잘리고, 마우스를 대면 전체가 보인다) */}
+                    <HistIcon kind={r.key} />
                     <span className="hist-text">{r.label}</span>
                   </div>
                 ))}
@@ -344,4 +354,9 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
       )}
     </div>
   );
+}
+
+function HistIcon({ kind }: { kind: string }) {
+  const I = HIST_ICON[kind];
+  return I ? <I className="hist-icon" size={11} stroke={2.2} /> : null;
 }

@@ -648,7 +648,7 @@ input[type="range"] {
   position: absolute;
   left: 0;
   right: 0;
-  height: 14px;
+  height: 17px;
   --hist: #6b7280;
 }
 
@@ -656,36 +656,51 @@ input[type="range"] {
 .hist-draw { --hist: #f59e0b; }
 .hist-insert { --hist: #22c55e; }
 .hist-transition { --hist: #a855f7; }
-.hist-zoom { --hist: #ef4444; }
+.hist-zoom { --hist: #f43f5e; }
 
+/* 알약 모양 띠: 위는 조금 밝게, 아래는 진하게. 테두리와 그림자는 은은하게 */
 .hist-span {
   position: absolute;
-  top: 0;
-  height: 14px;
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--hist) 80%, transparent);
+  top: 1px;
+  height: 16px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--hist) 78%, #fff) 0%, var(--hist) 100%);
+  border: 1px solid color-mix(in srgb, var(--hist) 80%, #000);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.18), inset 0 1px 0 rgb(255 255 255 / 0.25);
+  color: #fff;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  overflow: hidden;
+  transition: filter 0.12s, transform 0.12s, box-shadow 0.12s;
 }
 
 .hist-span:hover {
-  background: var(--hist);
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 5px rgb(0 0 0 / 0.25), inset 0 1px 0 rgb(255 255 255 / 0.3);
 }
 
-/* 띠 안의 효과 이름. 띠가 길어 앞이 스크롤로 가려져도 보이게 */
+.hist-icon {
+  flex: none;
+  filter: drop-shadow(0 1px 0 rgb(0 0 0 / 0.25));
+  pointer-events: none;
+}
+
+/* 띠 안의 효과 이름 (가운데 정렬, 좁으면 잘린다) */
 .hist-text {
-  position: sticky;
-  left: 0;
-  display: inline-block;
-  max-width: 100%;
-  padding: 0 5px;
-  box-sizing: border-box;
+  min-width: 0;
   font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   line-height: 14px;
-  color: #fff;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  vertical-align: top;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
   pointer-events: none;
 }
 
