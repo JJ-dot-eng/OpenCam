@@ -594,17 +594,6 @@ input[type="range"] {
   font-variant-numeric: tabular-nums;
 }
 
-/* 끌어 놓을 자리 표시 */
-.strip-drop {
-  position: absolute;
-  top: 4px;
-  bottom: 4px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--accent);
-  pointer-events: none;
-}
-
 /* 썸네일 줄을 감싼다 (축소 보기 표시를 오른쪽 위에 띄우려고) */
 .strip-wrap {
   flex: none;

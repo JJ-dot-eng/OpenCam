@@ -347,7 +347,6 @@ export type EditOp =
   | { op: "scaleSpeed"; sel: number[]; factor: number }
   | { op: "move"; sel: number[]; dir: number }
   | { op: "moveToEnd"; sel: number[]; toFront: boolean; copy: boolean }
-  | { op: "moveTo"; sel: number[]; to: number }
   | { op: "copy"; sel: number[] }
   | { op: "cut"; sel: number[] }
   | { op: "paste"; at: number }

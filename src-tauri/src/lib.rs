@@ -786,7 +786,6 @@ enum EditOp {
     ScaleSpeed { sel: Vec<usize>, factor: f64 },
     Move { sel: Vec<usize>, dir: i32 },
     MoveToEnd { sel: Vec<usize>, to_front: bool, copy: bool },
-    MoveTo { sel: Vec<usize>, to: usize },
     Copy { sel: Vec<usize> },
     Cut { sel: Vec<usize> },
     Paste { at: usize },
@@ -830,7 +829,6 @@ async fn edit(app: AppHandle, op: EditOp) -> CmdResult<ProjectView> {
             EditOp::ScaleSpeed { sel, factor } => p.scale_speed(&sel, factor),
             EditOp::Move { sel, dir } => selection = Some(p.move_by(&sel, dir)),
             EditOp::MoveToEnd { sel, to_front, copy } => p.move_to_end(&sel, to_front, copy),
-            EditOp::MoveTo { sel, to } => selection = Some(p.move_to(&sel, to)),
             EditOp::Copy { sel } => p.copy(&sel),
             EditOp::Cut { sel } => p.cut(&sel),
             EditOp::Paste { at } => {

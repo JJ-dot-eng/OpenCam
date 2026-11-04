@@ -1,5 +1,5 @@
 // 아래쪽 프레임 목록. 프레임이 수천 장이어도 보이는 칸만 그린다.
-// 썸네일을 끌어 다른 자리에 놓으면 프레임을 옮긴다 (선택한 여러 장이면 함께).
+// 썸네일을 끌어 프레임을 옮기는 기능은 없앴다(모르고 여러 장이 옮겨지는 일이 있어서). 순서는 잘라내기·붙여넣기로 바꾼다.
 // 도구 화면이 열려 있으면 썸네일 위에 적용 범위 띠를 그린다. 양 끝을 끌면 범위가, 가운데를 끌면 자리가 바뀐다.
 // Ctrl+휠로 줄이면 프레임 한 장이 칸 하나보다 좁아진다(축소 보기). 그때는 칸마다 그 자리 프레임 하나를 보여 주고,
 // 선택과 지금 프레임은 그 위에 색으로 칠한다.
@@ -28,8 +28,6 @@ interface Props {
   size: ThumbSize;
   /** 오른쪽 클릭: 프레임 번호와 화면 좌표 */
   onMenu: (i: number, x: number, y: number) => void;
-  /** 끌어 놓기: i번을 잡고 to번 자리(그 프레임 앞, 맨 뒤는 프레임 수)에 놓았다 */
-  onMove: (i: number, to: number) => void;
   /** 열린 도구의 적용 범위 (없으면 띠 줄을 그리지 않는다) */
   band?: Band | null;
   /** 효과 기록 띠를 눌렀다: 그 구간(처음~끝 프레임 번호) */
@@ -38,8 +36,6 @@ interface Props {
   onSeek?: (i: number) => void;
 }
 
-/** 이만큼(px) 움직여야 끌기로 본다. 그냥 누르기와 구분하려고 */
-const DRAG_START = 6;
 /** 범위 띠 줄 높이(px). 썸네일은 그만큼 아래로 내려간다 */
 const TRACK = 24;
 /** 효과 기록 한 줄 높이(px) */
@@ -55,14 +51,12 @@ const HIST_ICON: Record<string, Icon> = {
 /** Ctrl+휠 한 번에 바뀌는 배율 */
 const ZOOM_STEP = 1.25;
 
-export default function FrameStrip({ frames, current, sel, onSelect, threeDigit, size, onMenu, onMove, band, onPickRange, onSeek }: Props) {
+export default function FrameStrip({ frames, current, sel, onSelect, threeDigit, size, onMenu, band, onPickRange, onSeek }: Props) {
   const { w: itemW, h: itemH } = THUMB[size];
   const ITEM = itemW + 8;
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ left: 0, width: 1000 });
   const selected = new Set(sel);
-  /** 끌기 중이면 놓을 자리 (0..프레임 수) */
-  const [dropAt, setDropAt] = useState<number | null>(null);
 
   // 프레임 한 장의 폭(px). 가장 넓으면 칸 하나, 가장 좁으면 모든 프레임이 한 화면에 들어가는 폭
   const [unitWant, setUnitWant] = useState(ITEM);
@@ -78,48 +72,16 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
   /** Ctrl+휠로 배율을 바꾼 뒤, 마우스 밑에 있던 프레임 자리를 다시 마우스 밑으로 */
   const zoomAnchor = useRef<{ at: number; x: number } | null>(null);
 
-  /** 화면 x좌표 밑의 프레임 번호 (round면 가장 가까운 프레임 경계) */
-  const indexAt = (x: number, round = false) => {
+  /** 화면 x좌표 밑의 프레임 번호 */
+  const indexAt = (x: number) => {
     const el = ref.current!;
     const p = (x - el.getBoundingClientRect().left + el.scrollLeft) / unit;
-    return round ? Math.max(0, Math.min(frames.length, Math.round(p))) : Math.max(0, Math.min(frames.length - 1, Math.floor(p)));
+    return Math.max(0, Math.min(frames.length - 1, Math.floor(p)));
   };
 
-  /**
-   * 썸네일을 누른다. 이미 고른 프레임을 그냥 누르면 끌어서 여러 장을 함께 옮길 수 있게 선택은 뗄 때 바꾼다.
-   * 축소 보기(canMove=false)에서는 칸이 프레임 한 장이 아니라 여러 장이라 끌어 옮기지 않고 고르기만 한다
-   * (지금 프레임 선을 끌려다 고른 프레임들이 통째로 옮겨지던 문제).
-   */
-  const onItemDown = (i: number, e: React.MouseEvent, canMove = true) => {
-    if (e.button !== 0) return;
-    if (!canMove) {
-      onSelect(i, e);
-      return;
-    }
-    const keepSel = selected.has(i) && !e.ctrlKey && !e.shiftKey;
-    if (!keepSel) onSelect(i, e);
-    const el = ref.current;
-    if (!el) return;
-    const startX = e.clientX;
-    let to: number | null = null;
-    const move = (ev: MouseEvent) => {
-      if (to === null && Math.abs(ev.clientX - startX) < DRAG_START) return;
-      // 가장자리로 끌면 그쪽으로 스크롤
-      const r = el.getBoundingClientRect();
-      if (ev.clientX < r.left + 40) el.scrollLeft -= 20;
-      else if (ev.clientX > r.right - 40) el.scrollLeft += 20;
-      to = indexAt(ev.clientX, true);
-      setDropAt(to);
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      setDropAt(null);
-      if (to !== null) onMove(i, to);
-      else if (keepSel) onSelect(i, { ctrlKey: false, shiftKey: false });
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+  /** 썸네일을 누른다: 고르기만 한다 (Ctrl·Shift로 여러 장) */
+  const onItemDown = (i: number, e: React.MouseEvent) => {
+    if (e.button === 0) onSelect(i, e);
   };
 
   /** 지금 프레임 선(파란 선)을 잡고 끈다: 마우스 밑 프레임으로 옮긴다 (재생 위치 막대처럼) */
@@ -287,7 +249,7 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
           key={k}
           className="strip-item compact"
           style={{ left: x, top, width: w, height: itemH }}
-          onMouseDown={(e) => onItemDown(indexAt(e.clientX), e, false)}
+          onMouseDown={(e) => onItemDown(indexAt(e.clientX), e)}
           onContextMenu={(e) => {
             e.preventDefault();
             onMenu(indexAt(e.clientX), e.clientX, e.clientY);
@@ -380,7 +342,6 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
           ))}
           {items}
           {overlays}
-          {dropAt !== null && <div className="strip-drop" style={{ left: dropAt * unit - (compact ? 1 : 5), top: top - 2 }} />}
         </div>
       </div>
       {compact && (

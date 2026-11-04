@@ -316,29 +316,6 @@ impl Project {
         }
     }
 
-    /// 끌어 놓기: 고른 프레임을 지금 순서의 to번 자리(그 프레임 앞, 맨 뒤는 프레임 수)로 옮긴다.
-    /// 옮긴 뒤 그 프레임들의 위치를 돌려준다.
-    pub fn move_to(&mut self, sel: &[usize], to: usize) -> Vec<usize> {
-        let s = self.sel(sel);
-        if s.is_empty() {
-            return s;
-        }
-        let to = to.min(self.frames.len());
-        let at = to - s.iter().filter(|&&i| i < to).count();
-        // 이미 그 자리에 붙어 있으면 아무것도 하지 않는다 (되돌리기 기록도 남기지 않게)
-        if s.windows(2).all(|w| w[1] == w[0] + 1) && at == s[0] {
-            return s;
-        }
-        self.checkpoint();
-        let picked: Vec<Frame> = s.iter().map(|&i| self.frames[i].clone()).collect();
-        for &i in s.iter().rev() {
-            self.frames.remove(i);
-        }
-        let k = picked.len();
-        self.frames.splice(at..at, picked);
-        (at..at + k).collect()
-    }
-
     pub fn copy(&mut self, sel: &[usize]) {
         let s = self.sel(sel);
         self.clipboard = s.iter().map(|&i| self.frames[i].clone()).collect();
@@ -861,29 +838,6 @@ mod tests {
     }
 
     #[test]
-    fn move_to_drops_frames_before_target() {
-        let mut p = Project::default();
-        p.undo_enabled = true;
-        // 프레임 시간으로 어떤 프레임인지 알아본다
-        p.load((1..=5).map(|d| solid(2, 2, 0, d * 10)).collect());
-        let order = |p: &Project| p.frames.iter().map(|f| f.delay_ms / 10).collect::<Vec<_>>();
-        // 2·3번(0부터)을 맨 앞으로
-        assert_eq!(p.move_to(&[1, 2], 0), vec![0, 1]);
-        assert_eq!(order(&p), vec![2, 3, 1, 4, 5]);
-        // 첫 프레임을 4번 자리 앞(= 지금 5번째 앞)으로: 뒤로 옮기면 빠진 만큼 당겨진다
-        assert_eq!(p.move_to(&[0], 4), vec![3]);
-        assert_eq!(order(&p), vec![3, 1, 4, 2, 5]);
-        // 맨 뒤로
-        assert_eq!(p.move_to(&[0], 5), vec![4]);
-        assert_eq!(order(&p), vec![1, 4, 2, 5, 3]);
-        // 제자리면 되돌리기 기록이 늘지 않는다
-        let undo = p.undo.len();
-        assert_eq!(p.move_to(&[1], 1), vec![1]);
-        assert_eq!(p.move_to(&[1], 2), vec![1]);
-        assert_eq!(p.undo.len(), undo);
-    }
-
-    #[test]
     fn memory_counts_shared_buffers_once() {
         let mut p = Project::default();
         let a = solid(8, 8, 10, 100);
@@ -1081,7 +1035,7 @@ mod tests {
         let (f, i) = (tag::FILTER, tag::INSERT);
         assert_eq!(tags(&p), vec![0, f, f | i, i, i, 0]);
         // 옮기고 지워도 이름표는 프레임과 같이 다니고, 되돌리면 같이 되돌아간다
-        p.move_to(&[1], 6);
+        p.move_to_end(&[1], false, false);
         assert_eq!(tags(&p), vec![0, f | i, i, i, 0, f]);
         p.delete(&[0]);
         assert_eq!(tags(&p), vec![f | i, i, i, 0, f]);

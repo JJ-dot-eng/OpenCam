@@ -489,7 +489,6 @@ export default function Editor() {
   };
 
   /** 썸네일 끌어 놓기: 잡은 프레임이 선택에 들어 있으면 선택한 프레임을 함께 옮긴다 */
-  const moveFrames = (i: number, to: number) => !busy && run({ op: "moveTo", sel: sel.includes(i) ? sel : [i], to });
 
   // 단축키
   useEffect(() => {
@@ -891,7 +890,6 @@ export default function Editor() {
               onSelect={selectFrame}
               threeDigit={settings?.frameTime3digit ?? false}
               size="medium"
-              onMove={moveFrames}
               band={band}
               onSeek={(i) => timelineCtx.setCurrent(i)}
               onPickRange={(a, b) => {
