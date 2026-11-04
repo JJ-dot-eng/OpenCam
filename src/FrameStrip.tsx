@@ -358,5 +358,5 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
 
 function HistIcon({ kind }: { kind: string }) {
   const I = HIST_ICON[kind];
-  return I ? <I className="hist-icon" size={11} stroke={2.2} /> : null;
+  return I ? <I className="hist-icon" size={11} stroke={1.8} /> : null;
 }

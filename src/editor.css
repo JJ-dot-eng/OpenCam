@@ -643,50 +643,40 @@ input[type="range"] {
   opacity: 0.9;
 }
 
-/* 효과 기록: 효과 종류마다 한 줄, 썸네일 바로 위 (도구를 열지 않아도 보인다) */
+/* 효과 기록: 효과 종류마다 한 줄, 썸네일 바로 위 (도구를 열지 않아도 보인다).
+   색은 프로그램의 다른 부분과 같게 (버튼 회색, 마우스를 대면 선택 파랑). 종류는 아이콘과 이름으로 구분한다. */
 .hist-row {
   position: absolute;
   left: 0;
   right: 0;
   height: 17px;
-  --hist: #6b7280;
 }
 
-.hist-filter { --hist: #0ea5e9; }
-.hist-draw { --hist: #f59e0b; }
-.hist-insert { --hist: #22c55e; }
-.hist-transition { --hist: #a855f7; }
-.hist-zoom { --hist: #f43f5e; }
-
-/* 띠: 다른 화면처럼 네모에 모서리만 조금 둥글게. 위는 조금 밝게, 아래는 진하게. 테두리와 그림자는 은은하게 */
 .hist-span {
   position: absolute;
   top: 1px;
   height: 16px;
   box-sizing: border-box;
   border-radius: 4px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--hist) 78%, #fff) 0%, var(--hist) 100%);
-  border: 1px solid color-mix(in srgb, var(--hist) 80%, #000);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.18), inset 0 1px 0 rgb(255 255 255 / 0.25);
-  color: #fff;
+  background: var(--btn-hover);
+  border: 1px solid var(--line-strong);
+  color: var(--dim);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 3px;
   overflow: hidden;
-  transition: filter 0.12s, transform 0.12s, box-shadow 0.12s;
 }
 
 .hist-span:hover {
-  filter: brightness(1.08);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 5px rgb(0 0 0 / 0.25), inset 0 1px 0 rgb(255 255 255 / 0.3);
+  background: var(--sel);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .hist-icon {
   flex: none;
-  filter: drop-shadow(0 1px 0 rgb(0 0 0 / 0.25));
   pointer-events: none;
 }
 
@@ -694,13 +684,10 @@ input[type="range"] {
 .hist-text {
   min-width: 0;
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
   line-height: 14px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
   pointer-events: none;
 }
 
