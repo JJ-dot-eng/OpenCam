@@ -893,6 +893,7 @@ export default function Editor() {
               size="medium"
               onMove={moveFrames}
               band={band}
+              onSeek={(i) => timelineCtx.setCurrent(i)}
               onPickRange={(a, b) => {
                 // 효과 기록 띠를 누르면 그 구간을 고른다 (같은 구간에 다른 효과를 입히기 쉽게)
                 timelineCtx.selectRange(a, b);

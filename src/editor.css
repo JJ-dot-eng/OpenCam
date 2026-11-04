@@ -624,12 +624,23 @@ input[type="range"] {
   pointer-events: none;
 }
 
+/* 지금 프레임 선: 끌어서 보는 위치를 옮긴다 (재생 위치 막대처럼). 잡기 쉽게 양옆 5px까지 잡힌다 */
 .strip-curline {
   position: absolute;
+  z-index: 2;
   box-sizing: border-box;
   border: 2px solid var(--accent);
   border-radius: 2px;
-  pointer-events: none;
+  cursor: ew-resize;
+}
+
+.strip-curline::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  right: -5px;
 }
 
 /* 썸네일 그림 위 오른쪽 위 (아래쪽 번호·시간을 가리지 않게) */
