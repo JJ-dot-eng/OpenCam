@@ -78,53 +78,72 @@ export function dragBand(edge: BandEdge, orig: Span, value: number, total: numbe
   return { start, end: start + len };
 }
 
-/** 고른 프레임 번호들을 이어진 구간으로 묶는다 (축소 보기에서 선택을 칠할 때) */
+/** a~b 프레임 번호 목록 (선택으로 쓴다) */
+export function range(a: number, b: number): number[] {
+  return Array.from({ length: Math.max(0, b - a + 1) }, (_, k) => a + k);
+}
+
+/** 오름차순으로 오는 번호 i를 이어진 구간 목록에 붙인다 (바로 뒤면 늘리고, 아니면 새 구간) */
+function extend(out: Span[], i: number) {
+  const r = out[out.length - 1];
+  if (r && i <= r.end + 1) r.end = Math.max(r.end, i);
+  else out.push({ start: i, end: i });
+}
+
+/** 고른 프레임 번호들을 이어진 구간으로 묶는다 (축소 보기에서 선택을 칠할 때). 이미 차례대로면 정렬하지 않는다 */
 export function runs(indexes: number[]): Span[] {
+  let sorted = true;
+  for (let k = 1; k < indexes.length && sorted; k++) sorted = indexes[k - 1] <= indexes[k];
   const out: Span[] = [];
-  for (const i of [...indexes].sort((a, b) => a - b)) {
-    const r = out[out.length - 1];
-    if (r && i <= r.end + 1) r.end = Math.max(r.end, i);
-    else out.push({ start: i, end: i });
-  }
+  for (const i of sorted ? indexes : [...indexes].sort((a, b) => a - b)) extend(out, i);
   return out;
+}
+
+/** 프레임마다 시작 시각(ms). n+1개라서 a~b 구간 길이는 at[b+1] - at[a] */
+export function prefixMs(delays: number[]): number[] {
+  const at = [0];
+  for (const d of delays) at.push(at[at.length - 1] + d);
+  return at;
 }
 
 // ---------- 효과 기록 ----------
 
-/** 프레임에 입힌 효과 종류 (Rust `frame::tag`와 같은 비트). key는 CSS 이름에 쓴다 */
+/** 프레임에 입힌 효과 종류 (Rust `frame::tag`와 같은 비트, 테스트가 맞춰 본다). label은 왼쪽 도구 목록 이름과 같다 */
 export const EFFECT_TAGS = [
   { bit: 1, key: "filter", label: "필터" },
   { bit: 2, key: "draw", label: "그리기" },
-  { bit: 4, key: "insert", label: "텍스트·이미지" },
+  { bit: 4, key: "insert", label: "텍스트 · 이미지" },
   { bit: 8, key: "transition", label: "화면 전환" },
   { bit: 16, key: "zoom", label: "줌" },
 ] as const;
 
+export type EffectKey = (typeof EFFECT_TAGS)[number]["key"];
+
 export interface EffectRow {
-  key: string;
+  key: EffectKey;
   label: string;
   /** 이 효과가 입혀진 이어진 구간들 */
   spans: Span[];
 }
 
-/** 프레임마다 붙은 효과 이름표로 효과 종류마다 한 줄을 만든다. 한 번도 안 쓴 종류는 줄을 만들지 않는다. */
+/** 프레임마다 붙은 효과 이름표로 효과 종류마다 한 줄을 만든다 (한 번 훑기). 한 번도 안 쓴 종류는 줄을 만들지 않는다. */
 export function effectRows(tags: number[]): EffectRow[] {
-  const rows: EffectRow[] = [];
-  for (const t of EFFECT_TAGS) {
-    const spans: Span[] = [];
-    for (let i = 0; i < tags.length; i++) {
-      if (!(tags[i] & t.bit)) continue;
-      const last = spans[spans.length - 1];
-      if (last && last.end === i - 1) last.end = i;
-      else spans.push({ start: i, end: i });
-    }
-    if (spans.length) rows.push({ key: t.key, label: t.label, spans });
-  }
-  return rows;
+  const spans: Span[][] = EFFECT_TAGS.map(() => []);
+  tags.forEach((t, i) => {
+    if (!t) return;
+    EFFECT_TAGS.forEach((e, k) => {
+      if (t & e.bit) extend(spans[k], i);
+    });
+  });
+  return EFFECT_TAGS.flatMap((e, k) => (spans[k].length ? [{ key: e.key, label: e.label, spans: spans[k] }] : []));
 }
 
-/** 띠 이름 뒤에 붙는 말: "5~20번 · 1.60초" */
-export function spanText(delays: number[], s: Span): string {
+/** 띠 이름 뒤에 붙는 말: "5~20번 · 1.60초" (ms는 구간 길이) */
+export function spanLabel(s: Span, ms: number): string {
   const no = s.start === s.end ? `${s.start + 1}번` : `${s.start + 1}~${s.end + 1}번`;
-  return `${no} · ${(spanMs(delays, s.start, s.end) / 1000).toFixed(2)}초`;
+  return `${no} · ${(ms / 1000).toFixed(2)}초`;
+}
+
+export function spanText(delays: number[], s: Span): string {
+  return spanLabel(s, spanMs(delays, s.start, s.end));
 }

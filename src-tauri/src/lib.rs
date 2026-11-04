@@ -1788,9 +1788,18 @@ struct OverlayMeta {
     in_ms: f32,
     #[serde(default)]
     out_ms: f32,
-    /// 그리기 화면에서 온 것 (효과 기록에 "그리기"로 남긴다. 아니면 "텍스트·이미지")
+    /// 어느 도구에서 왔나 (효과 기록에 남길 종류)
     #[serde(default)]
-    draw: bool,
+    kind: OverlayKind,
+}
+
+/// 덧씌우기를 보낸 도구
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum OverlayKind {
+    Draw,
+    #[default]
+    Insert,
 }
 
 /// 그리기·텍스트·이미지 덧씌우기. 큰 픽셀 데이터를 JSON 없이 그대로 받는다.
@@ -1810,7 +1819,10 @@ async fn apply_overlay(app: AppHandle, request: tauri::ipc::Request<'_>) -> CmdR
         return Err("그림 크기가 맞지 않습니다".into());
     }
     let sel = metas[0].sel.clone();
-    let tag = if metas[0].draw { frame::tag::DRAW } else { frame::tag::INSERT };
+    let tag = match metas[0].kind {
+        OverlayKind::Draw => frame::tag::DRAW,
+        OverlayKind::Insert => frame::tag::INSERT,
+    };
     let mut at = 0;
     let ovs: Vec<Overlay> = metas
         .into_iter()

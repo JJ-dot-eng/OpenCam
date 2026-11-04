@@ -70,8 +70,8 @@ import "./editor.css";
 import { alertAsk, AskHost, confirmAsk } from "./ask";
 import { SidePanelTarget } from "./SidePanel";
 import { ModalInPanel } from "./dialogs";
-import { DirtyReport, FrameContext, TimelineContext, TimelineCtx } from "./Panel";
-import { Band } from "./timeline";
+import { bandSelect, DirtyReport, FrameContext, TimelineContext, TimelineCtx } from "./Panel";
+import { Band, range } from "./timeline";
 import { checkForUpdate } from "./updater";
 
 type Dialog = null | "reduce" | "resize" | "delay" | "cut" | "save" | "settings" | "transition" | "summary" | "upscale" | "newBlank" | "collage" | "manage" | "exportFrames";
@@ -446,7 +446,7 @@ export default function Editor() {
       setCurrent(i);
       if (e.shiftKey) {
         const [a, b] = [Math.min(anchor, i), Math.max(anchor, i)];
-        setSel(Array.from({ length: b - a + 1 }, (_, k) => a + k));
+        setSel(range(a, b));
       } else if (e.ctrlKey) {
         setSel((s) => (s.includes(i) ? s.filter((x) => x !== i) : [...s, i].sort((x, y) => x - y)));
         setAnchor(i);
@@ -487,8 +487,6 @@ export default function Editor() {
         showToast("이미지로 저장했습니다");
       })().catch((e) => showToast(errText(e)));
   };
-
-  /** 썸네일 끌어 놓기: 잡은 프레임이 선택에 들어 있으면 선택한 프레임을 함께 옮긴다 */
 
   // 단축키
   useEffect(() => {
@@ -611,7 +609,7 @@ export default function Editor() {
       delays: frames.map((f) => f.delayMs),
       setBand,
       selectRange: (a, b) => {
-        setSel(Array.from({ length: b - a + 1 }, (_, k) => a + k));
+        setSel(range(a, b));
         setAnchor(a);
       },
       setCurrent: (i) => {
@@ -782,7 +780,7 @@ export default function Editor() {
                 onApply={(rgba, w, h, target) => {
                   setModeRaw(null);
                   exec(() =>
-                    api.applyOverlay(rgba, { sel: target, w, h, x: 0, y: 0, animIn: "none", animOut: "none", inMs: 0, outMs: 0, draw: true }),
+                    api.applyOverlay(rgba, { sel: target, w, h, x: 0, y: 0, animIn: "none", animOut: "none", inMs: 0, outMs: 0, kind: "draw" }),
                   );
                 }}
               />
@@ -892,11 +890,8 @@ export default function Editor() {
               size="medium"
               band={band}
               onSeek={(i) => timelineCtx.setCurrent(i)}
-              onPickRange={(a, b) => {
-                // 효과 기록 띠를 누르면 그 구간을 고른다 (같은 구간에 다른 효과를 입히기 쉽게)
-                timelineCtx.selectRange(a, b);
-                timelineCtx.setCurrent(a);
-              }}
+              // 효과 기록 띠를 누르면 그 구간을 고른다 (같은 구간에 다른 효과를 입히기 쉽게)
+              onPickRange={(a, b) => bandSelect(timelineCtx, a, b, "start", true)}
               onMenu={(i, x, y) => {
                 if (!sel.includes(i)) selectFrame(i, { ctrlKey: false, shiftKey: false });
                 setMenu({ x, y });

@@ -332,8 +332,8 @@ export interface OverlayMeta {
   animOut: Anim;
   inMs: number;
   outMs: number;
-  /** 그리기 화면에서 온 것 (효과 기록에 "그리기"로 남긴다) */
-  draw?: boolean;
+  /** 어느 도구에서 왔나 (효과 기록에 남길 종류, 없으면 텍스트·이미지) */
+  kind?: "draw" | "insert";
 }
 
 export type EditOp =

@@ -242,12 +242,8 @@ impl Project {
             return;
         }
         self.checkpoint();
-        // 합은 u64로 센다 (600초 프레임 7200장이면 u32를 넘는다).
-        // 한 프레임 시간은 u32(ms)라서 그보다 길면(약 49.7일) 가장 긴 값으로 둔다
-        let total: u64 = s.iter().map(|&i| u64::from(self.frames[i].delay_ms)).sum();
-        // 합친 프레임은 합쳐진 프레임들에 입힌 효과 이름표를 모두 가진다
-        let tags = s.iter().fold(0, |t, &i| t | self.frames[i].tags);
-        self.frames[s[0]] = self.frames[s[0]].with_delay(u32::try_from(total).unwrap_or(u32::MAX)).tagged(tags);
+        // 첫 프레임이 나머지의 시간과 효과 이름표를 모두 물려받는다
+        self.frames[s[0]] = s[1..].iter().fold(self.frames[s[0]].clone(), |m, &i| m.absorb(&self.frames[i]));
         for &i in s[1..].iter().rev() {
             self.frames.remove(i);
         }
@@ -374,30 +370,19 @@ impl Project {
             gone[i] = true;
         }
         let mut out: Vec<Frame> = Vec::with_capacity(self.frames.len() - drop.len());
-        let mut carry = 0u64; // 앞에 남길 프레임이 없을 때 첫 프레임에 넘길 시간
-        let mut carry_tags = 0u8; // 그때 같이 넘길 효과 이름표
+        // 앞에 남길 프레임이 없을 때 첫 남는 프레임에 넘길, 지운 프레임들을 합친 것
+        let mut carry: Option<Frame> = None;
         for (i, f) in self.frames.iter().enumerate() {
             if gone[i] {
+                // 시간을 물려받는 프레임은 효과 이름표도 물려받는다 (그 시간에 효과가 있었으므로)
                 if keep_speed {
-                    // 시간을 물려받는 프레임은 효과 이름표도 물려받는다 (그 시간에 효과가 있었으므로)
                     match out.last_mut() {
-                        Some(prev) => {
-                            let total = u64::from(prev.delay_ms) + u64::from(f.delay_ms);
-                            *prev = prev.with_delay(u32::try_from(total).unwrap_or(u32::MAX)).tagged(f.tags);
-                        }
-                        None => {
-                            carry += u64::from(f.delay_ms);
-                            carry_tags |= f.tags;
-                        }
+                        Some(prev) => *prev = prev.absorb(f),
+                        None => carry = Some(carry.take().map_or_else(|| f.clone(), |c| c.absorb(f))),
                     }
                 }
             } else {
-                out.push(if carry > 0 {
-                    let total = u64::from(f.delay_ms) + std::mem::take(&mut carry);
-                    f.with_delay(u32::try_from(total).unwrap_or(u32::MAX)).tagged(std::mem::take(&mut carry_tags))
-                } else {
-                    f.clone()
-                });
+                out.push(carry.take().map_or_else(|| f.clone(), |c| f.absorb(&c)));
             }
         }
         self.frames = out;

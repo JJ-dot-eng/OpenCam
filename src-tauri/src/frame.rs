@@ -114,6 +114,13 @@ impl Frame {
     pub fn tagged(&self, tags: u8) -> Self {
         Frame { tags: self.tags | tags, ..self.clone() }
     }
+
+    /// 다른 프레임을 지우며 그 시간과 효과 이름표를 이 프레임이 물려받은 복사본 (합치기·속도 지키며 지우기).
+    /// 한 프레임 시간은 u32(ms)라서 넘치면(약 49.7일) 가장 긴 값으로 둔다.
+    pub fn absorb(&self, other: &Frame) -> Self {
+        let total = u64::from(self.delay_ms) + u64::from(other.delay_ms);
+        Frame { delay_ms: u32::try_from(total).unwrap_or(u32::MAX), tags: self.tags | other.tags, ..self.clone() }
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bounds, dragBand, effectRows, framesBackMs, framesForMs, runs, spanMs, spanText } from "../src/timeline.ts";
+import { readFileSync } from "node:fs";
+import { bounds, dragBand, EFFECT_TAGS, effectRows, framesBackMs, framesForMs, prefixMs, range, runs, spanMs, spanText } from "../src/timeline.ts";
 
 const delays = [100, 100, 200, 50, 50, 500];
 
@@ -78,4 +79,18 @@ test("effectRows makes one row per used effect with its continuous spans", () =>
       ["zoom", [{ start: 2, end: 2 }, { start: 4, end: 4 }]],
     ],
   );
+});
+
+test("effect tag bits match the Rust frame::tag constants", () => {
+  // Rust(frame.rs)와 화면(timeline.ts)이 같은 비트를 쓰는지 맞춰 본다
+  const rust = readFileSync(new URL("../src-tauri/src/frame.rs", import.meta.url), "utf8");
+  const consts = Object.fromEntries([...rust.matchAll(/pub const (\w+): u8 = (\d+);/g)].map((m) => [m[1].toLowerCase(), Number(m[2])]));
+  assert.deepEqual(Object.fromEntries(EFFECT_TAGS.map((t) => [t.key, t.bit])), consts);
+});
+
+test("range, prefixMs and runs on already sorted input", () => {
+  assert.deepEqual(range(3, 6), [3, 4, 5, 6]);
+  assert.deepEqual(range(5, 4), []);
+  assert.deepEqual(prefixMs([100, 50, 200]), [0, 100, 150, 350]);
+  assert.deepEqual(runs([1, 2, 3, 7, 8]), [{ start: 1, end: 3 }, { start: 7, end: 8 }]);
 });

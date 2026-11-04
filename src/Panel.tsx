@@ -39,11 +39,12 @@ export function useBand(band: Omit<Band, "onChange"> | null, onChange: Band["onC
   const { setBand } = useContext(TimelineContext);
   const cb = useRef(onChange);
   cb.current = onChange;
-  const key = band ? JSON.stringify(band) : "";
+  // 띠 내용이 바뀔 때만 다시 알린다. 떨어진 프레임 목록(marks)은 수천 개일 수 있어 글로 바꾸지 않고 같은 배열인지로 본다
+  const marks = band?.marks;
+  const key = band ? JSON.stringify({ ...band, marks: undefined }) : "";
   useEffect(() => {
     setBand(band ? { ...band, onChange: (a, b, edge, done) => cb.current(a, b, edge, done) } : null);
-    // 띠 내용(key)이 바뀔 때만 다시 알린다
-  }, [key, setBand]);
+  }, [key, marks, setBand]);
   useEffect(() => () => setBand(null), [setBand]);
 }
 

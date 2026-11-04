@@ -5,10 +5,11 @@
 // 선택과 지금 프레임은 그 위에 색으로 칠한다.
 // 썸네일 바로 위에는 효과 기록을 효과 종류마다 한 줄씩 그린다(도구를 열지 않아도). 기록 띠를 누르면 그 구간을 고른다.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon, IconAdjustmentsHorizontal, IconPencil, IconTransitionRight, IconTypography, IconZoomInArea } from "@tabler/icons-react";
 import { FrameInfo, frameUrl } from "./api";
-import { Band, BandEdge, dragBand, effectRows, runs, spanText } from "./timeline";
+import { TimelineContext } from "./Panel";
+import { Band, BandEdge, dragBand, EffectKey, effectRows, prefixMs, runs, spanLabel } from "./timeline";
 
 export type ThumbSize = "small" | "medium" | "large";
 /** 썸네일 칸 크기(px). w는 간격 8px을 뺀 칸 너비. 작게면 한 화면에 보통의 약 1.5배가 들어간다 */
@@ -41,7 +42,7 @@ const TRACK = 24;
 /** 효과 기록 한 줄 높이(px) */
 const ROW = 19;
 /** 효과 기록 띠에 붙는 아이콘 (왼쪽 도구 목록과 같은 것) */
-const HIST_ICON: Record<string, Icon> = {
+const HIST_ICON: Record<EffectKey, Icon> = {
   filter: IconAdjustmentsHorizontal,
   draw: IconPencil,
   insert: IconTypography,
@@ -56,7 +57,10 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
   const ITEM = itemW + 8;
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ left: 0, width: 1000 });
-  const selected = new Set(sel);
+  const selected = useMemo(() => new Set(sel), [sel]);
+  // 프레임마다 시작 시각(ms): 썸네일 시간·기록 띠 길이를 매번 더하지 않게 한 번만 만든다
+  const { delays } = useContext(TimelineContext);
+  const startMs = useMemo(() => prefixMs(delays), [delays]);
 
   // 프레임 한 장의 폭(px). 가장 넓으면 칸 하나, 가장 좁으면 모든 프레임이 한 화면에 들어가는 폭
   const [unitWant, setUnitWant] = useState(ITEM);
@@ -84,13 +88,16 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
     if (e.button === 0) onSelect(i, e);
   };
 
-  /** 지금 프레임 선(파란 선)을 잡고 끈다: 마우스 밑 프레임으로 옮긴다 (재생 위치 막대처럼) */
-  const onSeekDown = (e: React.MouseEvent) => {
+  /**
+   * 썸네일 줄 위에서 끌기: 마우스 밑 프레임 번호가 바뀔 때마다 onIndex를 부르고, 가장자리로 끌면 그쪽으로 스크롤한다.
+   * 손을 떼면 onUp. 파란 선 끌기와 범위 띠 끌기가 함께 쓴다.
+   */
+  const startIndexDrag = (e: React.MouseEvent, onIndex: (i: number) => void, onUp?: () => void) => {
     const el = ref.current;
     if (!el || e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    let last = current;
+    let last = indexAt(e.clientX);
     const move = (ev: MouseEvent) => {
       const r = el.getBoundingClientRect();
       if (ev.clientX < r.left + 40) el.scrollLeft -= 20;
@@ -98,46 +105,42 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
       const i = indexAt(ev.clientX);
       if (i === last) return;
       last = i;
-      onSeek?.(i);
+      onIndex(i);
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+      onUp?.();
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
 
+  /** 지금 프레임 선(파란 선)을 끈다: 마우스 밑 프레임으로 옮긴다 (재생 위치 막대처럼) */
+  const onSeekDown = (e: React.MouseEvent) => startIndexDrag(e, (i) => onSeek?.(i));
+
   /**
-   * 범위 띠의 끝이나 가운데를 잡고 끈다. 마우스 밑 프레임 번호로 계산해 바뀔 때마다 바로 알리고(done=false),
+   * 범위 띠의 끝이나 가운데를 끈다. 바뀔 때마다 바로 알리고(done=false),
    * 손을 떼면 마지막 범위를 한 번 더 알린다(done=true, 이때만 미리보기 그림을 바꾼다).
    */
   const onBandDown = (edge: BandEdge, e: React.MouseEvent) => {
-    const el = ref.current;
-    if (!band || !el || e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
+    if (!band) return;
     const orig = { start: band.start, end: band.end };
     const { onChange, minLen } = band;
     const from = indexAt(e.clientX);
     let last = orig;
-    const move = (ev: MouseEvent) => {
-      const r = el.getBoundingClientRect();
-      if (ev.clientX < r.left + 40) el.scrollLeft -= 20;
-      else if (ev.clientX > r.right - 40) el.scrollLeft += 20;
-      const i = indexAt(ev.clientX);
-      const next = dragBand(edge, orig, edge === "move" ? i - from : i, frames.length, minLen);
-      if (next.start === last.start && next.end === last.end) return;
-      last = next;
-      onChange(next.start, next.end, edge, false);
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      if (last.start !== orig.start || last.end !== orig.end) onChange(last.start, last.end, edge, true);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    startIndexDrag(
+      e,
+      (i) => {
+        const next = dragBand(edge, orig, edge === "move" ? i - from : i, frames.length, minLen);
+        if (next.start === last.start && next.end === last.end) return;
+        last = next;
+        onChange(next.start, next.end, edge, false);
+      },
+      () => {
+        if (last.start !== orig.start || last.end !== orig.end) onChange(last.start, last.end, edge, true);
+      },
+    );
   };
 
   useEffect(() => {
@@ -189,9 +192,19 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
   }, [current]);
 
   const n = frames.length;
-  // 효과 기록: 효과 종류마다 한 줄 (쓴 종류만). 범위 띠 줄 아래, 썸네일 바로 위
-  const delays = useMemo(() => frames.map((f) => f.delayMs), [frames]);
-  const rows = useMemo(() => effectRows(frames.map((f) => f.tags ?? 0)), [frames]);
+  // 효과 기록: 효과 종류마다 한 줄 (쓴 종류만). 범위 띠 줄 아래, 썸네일 바로 위. 띠마다 설명 글도 여기서 한 번만 만든다
+  const rows = useMemo(
+    () =>
+      effectRows(frames.map((f) => f.tags)).map((r) => ({
+        ...r,
+        titles: r.spans.map((x) => `${r.label} · ${spanLabel(x, startMs[x.end + 1] - startMs[x.start])} (누르면 이 구간을 고릅니다)`),
+      })),
+    [frames, startMs],
+  );
+  const selRuns = useMemo(() => runs(sel), [sel]);
+  const markRuns = useMemo(() => (band?.marks ? runs(band.marks) : []), [band?.marks]);
+  /** a~b 프레임이 지금 보이는 곳에 걸치나 (pad만큼 넉넉하게) */
+  const visible = (a: number, b: number, pad = 0) => (b + 1) * unit >= view.left - pad && a * unit <= view.left + view.width + pad;
   const histTop = band ? 4 + TRACK : 4;
   const top = histTop + rows.length * ROW + (rows.length ? 4 : 2);
   const items = [];
@@ -200,8 +213,6 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
     // 프레임이 갑자기 줄면(요약·삭제) 스크롤 위치가 아직 예전 값일 수 있어 목록 길이로 막는다
     const first = Math.min(n, Math.max(0, Math.floor(view.left / ITEM) - 2));
     const last = Math.min(n, Math.ceil((view.left + view.width) / ITEM) + 2);
-    let start = 0;
-    for (let i = 0; i < first; i++) start += frames[i].delayMs;
     for (let i = first; i < last; i++) {
       const f = frames[i];
       items.push(
@@ -214,7 +225,7 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
             e.preventDefault();
             onMenu(i, e.clientX, e.clientY);
           }}
-          title={`${i + 1}번 · ${f.delayMs}ms · 시작 ${(start / 1000).toFixed(2)}초`}
+          title={`${i + 1}번 · ${f.delayMs}ms · 시작 ${((startMs[i] ?? 0) / 1000).toFixed(2)}초`}
         >
           <div className="strip-thumb">
             <img src={frameUrl(f.id, true)} draggable={false} loading="lazy" />
@@ -225,19 +236,12 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
           </div>
         </div>,
       );
-      start += f.delayMs;
     }
   } else {
     // 축소 보기: 칸(ITEM px)마다 그 가운데에 있는 프레임 하나를 보여 준다. 누르면 마우스 밑 프레임을 고른다.
     const innerW = n * unit;
     const firstTile = Math.max(0, Math.floor(view.left / ITEM) - 1);
     const lastTile = Math.min(Math.ceil(innerW / ITEM), Math.ceil((view.left + view.width) / ITEM) + 1);
-    const starts: number[] = [];
-    let t = 0;
-    for (const f of frames) {
-      starts.push(t);
-      t += f.delayMs;
-    }
     for (let k = firstTile; k < lastTile; k++) {
       const x = k * ITEM;
       const w = Math.min(itemW, innerW - x);
@@ -260,14 +264,13 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
           </div>
           <div className="strip-meta">
             <span>{i + 1}</span>
-            <span>{(starts[i] / 1000).toFixed(threeDigit ? 3 : 2)}초</span>
+            <span>{((startMs[i] ?? 0) / 1000).toFixed(threeDigit ? 3 : 2)}초</span>
           </div>
         </div>,
       );
     }
-    const seen = (a: number, b: number) => (b + 1) * unit >= view.left && a * unit <= view.left + view.width;
-    for (const r of runs(sel)) {
-      if (!seen(r.start, r.end)) continue;
+    for (const r of selRuns) {
+      if (!visible(r.start, r.end)) continue;
       overlays.push(
         <div key={`s${r.start}`} className="strip-selrun" style={{ left: r.start * unit, width: Math.max(2, (r.end - r.start + 1) * unit), top, height: itemH }} />,
       );
@@ -289,7 +292,6 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
   const bs = band ? Math.max(0, Math.min(last1, band.start)) : 0;
   const be = band ? Math.max(bs, Math.min(last1, band.end)) : 0;
   const span = (a: number, b: number) => Math.max(compact ? 2 : 0, (b - a + 1) * unit - gap);
-  const seenSpan = (a: number, b: number) => (b + 1) * unit >= view.left - 50 && a * unit <= view.left + view.width + 50;
 
   return (
     <div className="strip-wrap">
@@ -311,9 +313,12 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
                     title={p.label}
                   />
                 ))}
-                {band.marks?.map((i) => (
-                  <div key={i} className="band-mark" style={{ left: (i - bs) * unit, width: Math.max(2, unit - gap) }} />
-                ))}
+                {/* 떨어진 프레임 표시: 이어진 구간으로 묶고 보이는 것만 그린다 (수천 장을 골라도 가볍게) */}
+                {markRuns
+                  .filter((m) => visible(m.start, m.end, 50))
+                  .map((m) => (
+                    <div key={m.start} className="band-mark" style={{ left: (m.start - bs) * unit, width: Math.max(2, span(m.start, m.end)) }} />
+                  ))}
                 <span className="band-label">{band.label}</span>
                 <div className="band-edge start" onMouseDown={(e) => onBandDown("start", e)} />
                 <div className="band-edge end" onMouseDown={(e) => onBandDown("end", e)} />
@@ -321,15 +326,14 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
             </div>
           )}
           {rows.map((r, k) => (
-            <div key={r.key} className={`hist-row hist-${r.key}`} style={{ top: histTop + k * ROW }}>
-              {r.spans
-                .filter((x) => seenSpan(x.start, x.end))
-                .map((x) => (
+            <div key={r.key} className="hist-row" style={{ top: histTop + k * ROW }}>
+              {r.spans.map((x, q) =>
+                !visible(x.start, x.end, 50) ? null : (
                   <div
                     key={x.start}
                     className="hist-span"
                     style={{ left: x.start * unit, width: Math.max(3, span(x.start, x.end)) }}
-                    title={`${r.label} · ${spanText(delays, x)} (누르면 이 구간을 고릅니다)`}
+                    title={r.titles[q]}
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={() => onPickRange?.(x.start, x.end)}
                   >
@@ -337,7 +341,8 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
                     <HistIcon kind={r.key} />
                     <span className="hist-text">{r.label}</span>
                   </div>
-                ))}
+                ),
+              )}
             </div>
           ))}
           {items}
@@ -359,7 +364,7 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
   );
 }
 
-function HistIcon({ kind }: { kind: string }) {
+function HistIcon({ kind }: { kind: EffectKey }) {
   const I = HIST_ICON[kind];
-  return I ? <I className="hist-icon" size={11} stroke={1.8} /> : null;
+  return <I className="hist-icon" size={11} stroke={1.8} />;
 }
