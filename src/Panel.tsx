@@ -4,7 +4,7 @@
 import { createContext, ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { IconChevronDown, IconChevronRight } from "@tabler/icons-react";
 import { errText } from "./api";
-import { Band, BandEdge, spanText } from "./timeline";
+import { Band, BandEdge, bounds, spanText } from "./timeline";
 
 /** 지금 편집 상황: 보고 있는 프레임(0부터), 전체 장수, 고른 프레임 */
 export interface FrameCtx {
@@ -41,7 +41,7 @@ export function useBand(band: Omit<Band, "onChange"> | null, onChange: Band["onC
   cb.current = onChange;
   const key = band ? JSON.stringify(band) : "";
   useEffect(() => {
-    setBand(band ? { ...band, onChange: (a, b, edge) => cb.current(a, b, edge) } : null);
+    setBand(band ? { ...band, onChange: (a, b, edge, done) => cb.current(a, b, edge, done) } : null);
     // 띠 내용(key)이 바뀔 때만 다시 알린다
   }, [key, setBand]);
   useEffect(() => () => setBand(null), [setBand]);
@@ -307,9 +307,10 @@ export function defaultScope(f: FrameCtx): Scope {
  */
 export function scopeText(scope: Scope, f: FrameCtx, span: boolean): string {
   if (scope === "current") return `지금 프레임(${f.current + 1}번)에만 적용`;
-  if (scope === "selection" && f.sel.length > 0) {
-    const a = Math.min(...f.sel) + 1;
-    const b = Math.max(...f.sel) + 1;
+  const sb = bounds(f.sel);
+  if (scope === "selection" && sb) {
+    const a = sb.start + 1;
+    const b = sb.end + 1;
     return span ? `선택 구간 ${a}~${b}번(${b - a + 1}장)에 적용` : `선택한 ${f.sel.length}장에 적용`;
   }
   return `전체 ${f.total}장에 적용`;
@@ -318,14 +319,15 @@ export function scopeText(scope: Scope, f: FrameCtx, span: boolean): string {
 /** 범위가 덮는 프레임 구간 (떨어진 프레임을 골랐으면 처음~끝) */
 export function scopeSpan(scope: Scope, f: FrameCtx): { start: number; end: number } {
   if (scope === "current") return { start: f.current, end: f.current };
-  if (scope === "selection" && f.sel.length > 0) return { start: Math.min(...f.sel), end: Math.max(...f.sel) };
-  return { start: 0, end: Math.max(0, f.total - 1) };
+  const sb = scope === "selection" ? bounds(f.sel) : null;
+  return sb ?? { start: 0, end: Math.max(0, f.total - 1) };
 }
 
 /** 띠를 끌었을 때: 그 구간을 고르고, 잡은 쪽 끝 프레임을 보여 준다 */
-export function bandSelect(t: TimelineCtx, start: number, end: number, edge: BandEdge) {
+export function bandSelect(t: TimelineCtx, start: number, end: number, edge: BandEdge, done: boolean) {
   t.selectRange(start, end);
-  t.setCurrent(edge === "end" ? end : start);
+  // 지금 프레임을 바꾸면 미리보기 그림을 원본 크기로 새로 불러오므로 손을 뗐을 때만
+  if (done) t.setCurrent(edge === "end" ? end : start);
 }
 
 export function ScopePicker({
@@ -346,8 +348,8 @@ export function ScopePicker({
   // 필터처럼 고른 프레임만 바꾸는 도구는 떨어진 프레임을 따로 표시한다
   const gaps = !span && value === "selection" && f.sel.length > 0 && f.sel.length !== s.end - s.start + 1;
   const label = gaps ? `${name} · 선택한 ${f.sel.length}장` : `${name} · ${spanText(t.delays, s)}`;
-  useBand({ ...s, label, marks: gaps ? f.sel : undefined }, (a, b, edge) => {
-    bandSelect(t, a, b, edge);
+  useBand({ ...s, label, marks: gaps ? f.sel : undefined }, (a, b, edge, done) => {
+    bandSelect(t, a, b, edge, done);
     onChange("selection");
   });
   const noSel = f.sel.length === 0 ? "프레임 목록에서 프레임을 먼저 고르세요 (Ctrl·Shift로 여러 장)" : undefined;

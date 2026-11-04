@@ -13,7 +13,7 @@ import {
 
 import SidePanel from "./SidePanel";
 import { bandSelect, Field, FrameContext, NumInput, PanelFoot, Section, Segmented, Slider, TimelineContext, useBand, useReportDirty } from "./Panel";
-import { framesBackMs, framesForMs, spanText } from "./timeline";
+import { bounds, framesBackMs, framesForMs, spanText } from "./timeline";
 
 /** true면 Modal을 창 가운데가 아니라 편집 창 오른쪽 패널에 그린다 (왼쪽 도구 목록에서 연 도구) */
 export const ModalInPanel = createContext(false);
@@ -568,8 +568,9 @@ export function TransitionDialog({
     crossfadeLoop: `마지막 ${ms}ms를 첫 프레임과 겹쳐, 반복 재생할 때 끝과 처음이 자연스럽게 이어집니다.`,
   };
   const span = selCount > 1;
-  const a = span ? Math.min(...f.sel) + 1 : 1;
-  const b = span ? Math.max(...f.sel) + 1 : f.total;
+  const sb = span ? bounds(f.sel) : null;
+  const a = sb ? sb.start + 1 : 1;
+  const b = sb ? sb.end + 1 : f.total;
   // 썸네일 줄 띠: 효과가 걸리는 부분(처음 또는 마지막 ms)을 진하게
   const t = useContext(TimelineContext);
   const s = { start: a - 1, end: b - 1 };
@@ -578,8 +579,8 @@ export function TransitionDialog({
   const part = atStart
     ? { start: s.start, end: Math.min(s.end, framesForMs(t.delays, s.start, ems)) }
     : { start: framesBackMs(t.delays, s.end, ems, s.start), end: s.end };
-  useBand({ ...s, label: `화면 전환 · ${spanText(t.delays, s)}`, parts: [{ ...part, label: `효과 ${ems}ms` }], minLen: 2 }, (x, y, edge) =>
-    bandSelect(t, x, y, edge),
+  useBand({ ...s, label: `화면 전환 · ${spanText(t.delays, s)}`, parts: [{ ...part, label: `효과 ${ems}ms` }], minLen: 2 }, (x, y, edge, done) =>
+    bandSelect(t, x, y, edge, done),
   );
   return (
     <Modal

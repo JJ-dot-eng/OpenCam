@@ -19,11 +19,26 @@ export interface Band extends Span {
   marks?: number[];
   /** 띠가 덮어야 하는 최소 프레임 수 (화면 전환은 2장) */
   minLen?: number;
-  /** 끌어서 범위를 바꿨다. edge는 잡은 곳 */
-  onChange: (start: number, end: number, edge: BandEdge) => void;
+  /**
+   * 끌어서 범위를 바꿨다. edge는 잡은 곳. done은 손을 뗐을 때만 true:
+   * 끄는 동안에는 띠·번호만 바꾸고, 미리보기 그림을 바꾸는 무거운 일은 손을 뗐을 때 한 번만 한다.
+   */
+  onChange: (start: number, end: number, edge: BandEdge, done: boolean) => void;
 }
 
 export type BandEdge = "start" | "end" | "move";
+
+/** 프레임 번호들의 처음·끝. 한 번 훑어서 찾는다 (Math.min(...목록)은 수만 장이면 멈출 수 있어서). 비었으면 null */
+export function bounds(indexes: number[]): Span | null {
+  if (indexes.length === 0) return null;
+  let start = indexes[0];
+  let end = indexes[0];
+  for (const i of indexes) {
+    if (i < start) start = i;
+    else if (i > end) end = i;
+  }
+  return { start, end };
+}
 
 /** start부터 시간을 쌓아 ms에 닿는 마지막 프레임 번호 (끝을 넘으면 마지막 프레임) */
 export function framesForMs(delays: number[], start: number, ms: number): number {

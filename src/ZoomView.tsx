@@ -67,15 +67,23 @@ export default function ZoomView({ frame, index, remainMs, scale, onApply, onCan
   const valid = Number.isFinite(totalSec) && totalSec > 0;
 
   // 썸네일 줄 띠: 지금 프레임부터 총 시간만큼, 커지기·돌아오기 부분은 진하게.
-  // 띠를 끌면 시작 프레임(지금 프레임)과 총 시간이 바뀐다.
+  // 띠를 끌면 시작 프레임(지금 프레임)과 총 시간이 바뀐다. 끄는 동안 시작 프레임은 여기(dragStart)에만 두고,
+  // 손을 뗐을 때 지금 프레임을 옮긴다 (지금 프레임을 바꾸면 미리보기 그림을 원본 크기로 새로 불러와서).
   const t = useContext(TimelineContext);
-  const span = { start: index, end: framesForMs(t.delays, index, actualMs) };
+  const [dragStart, setDragStart] = useState<number | null>(null);
+  useEffect(() => {
+    if (dragStart === index) setDragStart(null);
+  }, [index, dragStart]);
+  const start = dragStart ?? index;
+  const bandMs = dragStart === null ? actualMs : Math.min(zoom.totalMs, spanMs(t.delays, start, t.delays.length - 1));
+  const span = { start, end: framesForMs(t.delays, start, bandMs) };
   const parts = [];
   if (zoom.introMs > 0) parts.push({ start: span.start, end: Math.min(span.end, framesForMs(t.delays, span.start, zoom.introMs)), label: `커지기 ${zoom.introMs}ms` });
   if (zoom.outroMs > 0) parts.push({ start: framesBackMs(t.delays, span.end, zoom.outroMs, span.start), end: span.end, label: `돌아오기 ${zoom.outroMs}ms` });
-  useBand({ ...span, label: `줌 · ${spanText(t.delays, span)}`, parts }, (a, b) => {
-    if (a !== index) t.setCurrent(a);
+  useBand({ ...span, label: `줌 · ${spanText(t.delays, span)}`, parts }, (a, b, _edge, done) => {
     setTotalSec(spanMs(t.delays, a, b) / 1000);
+    setDragStart(a === index ? null : a);
+    if (done && a !== index) t.setCurrent(a);
   });
 
   // 결과 미리보기 (가장 크게 확대된 순간)

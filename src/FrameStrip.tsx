@@ -98,7 +98,10 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
     window.addEventListener("mouseup", up);
   };
 
-  /** 범위 띠의 끝이나 가운데를 잡고 끈다. 마우스 밑 프레임 번호로 계산하고, 바뀔 때마다 바로 알린다. */
+  /**
+   * 범위 띠의 끝이나 가운데를 잡고 끈다. 마우스 밑 프레임 번호로 계산해 바뀔 때마다 바로 알리고(done=false),
+   * 손을 떼면 마지막 범위를 한 번 더 알린다(done=true, 이때만 미리보기 그림을 바꾼다).
+   */
   const onBandDown = (edge: BandEdge, e: React.MouseEvent) => {
     const el = ref.current;
     if (!band || !el || e.button !== 0) return;
@@ -116,11 +119,12 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
       const next = dragBand(edge, orig, edge === "move" ? i - from : i, frames.length, minLen);
       if (next.start === last.start && next.end === last.end) return;
       last = next;
-      onChange(next.start, next.end, edge);
+      onChange(next.start, next.end, edge, false);
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+      if (last.start !== orig.start || last.end !== orig.end) onChange(last.start, last.end, edge, true);
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);

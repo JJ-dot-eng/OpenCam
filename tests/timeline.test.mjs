@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dragBand, framesBackMs, framesForMs, runs, spanMs, spanText } from "../src/timeline.ts";
+import { bounds, dragBand, framesBackMs, framesForMs, runs, spanMs, spanText } from "../src/timeline.ts";
 
 const delays = [100, 100, 200, 50, 50, 500];
 
@@ -58,4 +58,11 @@ test("runs groups selected frames into continuous spans, in any order", () => {
     { start: 9, end: 9 },
   ]);
   assert.deepEqual(runs([4, 4, 5]), [{ start: 4, end: 5 }]);
+});
+
+test("bounds finds the first and last frame in one pass, even for huge selections", () => {
+  assert.equal(bounds([]), null);
+  assert.deepEqual(bounds([7, 2, 9, 4]), { start: 2, end: 9 });
+  const huge = Array.from({ length: 300_000 }, (_, i) => i + 5);
+  assert.deepEqual(bounds(huge), { start: 5, end: 300_004 });
 });
