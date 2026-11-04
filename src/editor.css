@@ -660,10 +660,10 @@ input[type="range"] {
 
 .hist-span {
   position: absolute;
-  top: 2px;
-  height: 10px;
+  top: 0;
+  height: 14px;
   border-radius: 3px;
-  background: color-mix(in srgb, var(--hist) 70%, transparent);
+  background: color-mix(in srgb, var(--hist) 80%, transparent);
   cursor: pointer;
 }
 
@@ -671,18 +671,21 @@ input[type="range"] {
   background: var(--hist);
 }
 
-/* 줄 이름은 스크롤해도 왼쪽에 남는다 */
-.hist-label {
+/* 띠 안의 효과 이름. 띠가 길어 앞이 스크롤로 가려져도 보이게 */
+.hist-text {
   position: sticky;
   left: 0;
-  z-index: 1;
   display: inline-block;
-  padding: 0 6px;
+  max-width: 100%;
+  padding: 0 5px;
+  box-sizing: border-box;
   font-size: 10px;
   line-height: 14px;
-  color: var(--hist);
-  background: color-mix(in srgb, var(--panel) 85%, transparent);
-  border-radius: 0 3px 3px 0;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
   pointer-events: none;
 }
 

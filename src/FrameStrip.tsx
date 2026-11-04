@@ -309,7 +309,6 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
           )}
           {rows.map((r, k) => (
             <div key={r.key} className={`hist-row hist-${r.key}`} style={{ top: histTop + k * ROW }}>
-              <span className="hist-label">{r.label}</span>
               {r.spans
                 .filter((x) => seenSpan(x.start, x.end))
                 .map((x) => (
@@ -320,7 +319,10 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
                     title={`${r.label} · ${spanText(delays, x)} (누르면 이 구간을 고릅니다)`}
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={() => onPickRange?.(x.start, x.end)}
-                  />
+                  >
+                    {/* 띠마다 효과 이름 (좁으면 잘리고, 마우스를 대면 전체가 보인다) */}
+                    <span className="hist-text">{r.label}</span>
+                  </div>
                 ))}
             </div>
           ))}
