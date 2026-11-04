@@ -644,7 +644,7 @@ input[type="range"] {
 }
 
 /* 효과 기록: 효과 종류마다 한 줄, 썸네일 바로 위 (도구를 열지 않아도 보인다).
-   색은 프로그램의 다른 부분과 같게 (버튼 회색, 마우스를 대면 선택 파랑). 종류는 아이콘과 이름으로 구분한다. */
+   색은 프로그램의 강조 파랑 하나만 옅게 쓴다 (선택·적용 범위 띠와 같은 색). 종류는 아이콘과 이름으로 구분한다. */
 .hist-row {
   position: absolute;
   left: 0;
@@ -658,9 +658,9 @@ input[type="range"] {
   height: 16px;
   box-sizing: border-box;
   border-radius: 4px;
-  background: var(--btn-hover);
-  border: 1px solid var(--line-strong);
-  color: var(--dim);
+  background: var(--sel);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: var(--accent);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -670,9 +670,8 @@ input[type="range"] {
 }
 
 .hist-span:hover {
-  background: var(--sel);
+  background: color-mix(in srgb, var(--accent) 22%, var(--panel));
   border-color: var(--accent);
-  color: var(--accent);
 }
 
 .hist-icon {
