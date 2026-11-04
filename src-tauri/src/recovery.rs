@@ -35,6 +35,9 @@ struct FrameEntry {
     width: u32,
     height: u32,
     delay_ms: u32,
+    /// 입힌 효과 종류 (`frame::tag`). 예전 파일에는 없다.
+    #[serde(default)]
+    tags: u8,
 }
 
 /// 복구할 수 있는 작업 하나 (화면에 보여 줄 정보)
@@ -141,7 +144,7 @@ fn write_frames(
         saved_at: chrono::Local::now().timestamp_millis(),
         frames: frames
             .iter()
-            .map(|f| FrameEntry { file: f.id, width: f.width, height: f.height, delay_ms: f.delay_ms })
+            .map(|f| FrameEntry { file: f.id, width: f.width, height: f.height, delay_ms: f.delay_ms, tags: f.tags })
             .collect(),
     };
     let tmp = dir.join("manifest.tmp");
@@ -238,7 +241,7 @@ pub fn load(dir: &Path) -> Result<Vec<Frame>> {
         .map(|e| {
             let data = std::fs::read(fdir.join(format!("{}.lz4", frame_stem(&m.session, e.file))))
                 .with_context(|| format!("프레임 파일이 없습니다 ({})", e.file))?;
-            Frame::from_packed(e.width, e.height, e.delay_ms, data)
+            Frame::from_packed(e.width, e.height, e.delay_ms, e.tags, data)
                 .with_context(|| format!("프레임 파일이 깨졌습니다 ({})", e.file))
         })
         .collect()
@@ -249,7 +252,7 @@ pub fn first_frame(dir: &Path) -> Result<Frame> {
     let m = read_manifest(dir)?;
     let e = m.frames.first().context("프레임이 없습니다")?;
     let data = std::fs::read(dir.join("frames").join(format!("{}.lz4", frame_stem(&m.session, e.file))))?;
-    Frame::from_packed(e.width, e.height, e.delay_ms, data).context("프레임 파일이 깨졌습니다")
+    Frame::from_packed(e.width, e.height, e.delay_ms, e.tags, data).context("프레임 파일이 깨졌습니다")
 }
 
 fn read_manifest(dir: &Path) -> Result<Manifest> {
@@ -296,12 +299,15 @@ mod tests {
         let cur = current(&root);
         let a = frame(1, 10);
         let b = frame(2, 20);
-        save(&cur, &[a.clone(), b.clone(), a.with_delay(30)], &GO).unwrap();
+        // 효과 이름표도 함께 남는다
+        let tags = crate::frame::tag::FILTER | crate::frame::tag::ZOOM;
+        save(&cur, &[a.clone(), b.tagged(tags), a.with_delay(30)], &GO).unwrap();
         // 같은 픽셀(시간만 바꾼 복사본)은 파일 하나
         assert_eq!(std::fs::read_dir(cur.join("frames")).unwrap().count(), 2);
         let back = load(&cur).unwrap();
         assert_eq!(back.iter().map(|f| f.delay_ms).collect::<Vec<_>>(), vec![10, 20, 30]);
         assert_eq!(back[1].rgba(), b.rgba());
+        assert_eq!(back.iter().map(|f| f.tags).collect::<Vec<_>>(), vec![0, tags, 0]);
         // b를 빼면 b 파일도 지운다
         save(&cur, &[a.clone()], &GO).unwrap();
         assert_eq!(std::fs::read_dir(cur.join("frames")).unwrap().count(), 1);

@@ -28,6 +28,17 @@ pub fn new_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// 프레임에 입힌 효과 종류 (효과 기록 타임라인용). 비트마다 한 종류.
+/// 효과는 픽셀에 바로 박히므로 이건 "여기에 입혔다"는 이름표일 뿐이다. 프레임과 같이 다녀서
+/// 지우기·옮기기·복사·되돌리기를 해도 저절로 맞는다.
+pub mod tag {
+    pub const FILTER: u8 = 1;
+    pub const DRAW: u8 = 2;
+    pub const INSERT: u8 = 4;
+    pub const TRANSITION: u8 = 8;
+    pub const ZOOM: u8 = 16;
+}
+
 #[derive(Clone)]
 pub struct Frame {
     pub id: u64,
@@ -35,13 +46,15 @@ pub struct Frame {
     pub height: u32,
     /// 이 프레임을 보여주는 시간(ms)
     pub delay_ms: u32,
+    /// 입힌 효과 종류 (`tag`의 비트를 합친 것)
+    pub tags: u8,
     packed: Arc<Vec<u8>>,
 }
 
 impl Frame {
     pub fn from_rgba(width: u32, height: u32, rgba: &[u8], delay_ms: u32) -> Self {
         debug_assert_eq!(rgba_len(width, height), Some(rgba.len()), "프레임 크기와 픽셀 데이터가 맞지 않습니다");
-        Frame { id: new_id(), width, height, delay_ms, packed: Arc::new(lz4_flex::compress_prepend_size(rgba)) }
+        Frame { id: new_id(), width, height, delay_ms, tags: 0, packed: Arc::new(lz4_flex::compress_prepend_size(rgba)) }
     }
 
     pub fn rgba(&self) -> Vec<u8> {
@@ -59,7 +72,7 @@ impl Frame {
     }
 
     /// 작업 자동 저장 파일에서 읽은 압축 픽셀로 만든다. 깨진 데이터면 None (나중에 풀다가 꺼지지 않게 미리 풀어 본다).
-    pub fn from_packed(width: u32, height: u32, delay_ms: u32, packed: Vec<u8>) -> Option<Self> {
+    pub fn from_packed(width: u32, height: u32, delay_ms: u32, tags: u8, packed: Vec<u8>) -> Option<Self> {
         if width == 0 || height == 0 {
             return None;
         }
@@ -69,7 +82,7 @@ impl Frame {
             return None;
         }
         let px = lz4_flex::decompress_size_prepended(&packed).ok()?;
-        (px.len() == len).then(|| Frame { id: new_id(), width, height, delay_ms, packed: Arc::new(packed) })
+        (px.len() == len).then(|| Frame { id: new_id(), width, height, delay_ms, tags, packed: Arc::new(packed) })
     }
 
     /// 압축된 픽셀 (작업 자동 저장용)
@@ -86,10 +99,20 @@ impl Frame {
         Arc::as_ptr(&self.packed) as usize
     }
 
-    /// 픽셀을 바꾼 새 프레임 (시간은 유지)
+    /// 픽셀을 바꾼 새 프레임 (시간·효과 이름표는 유지)
     pub fn map_pixels(&self, f: impl FnOnce(u32, u32, Vec<u8>) -> (u32, u32, Vec<u8>)) -> Self {
         let (w, h, px) = f(self.width, self.height, self.rgba());
-        Frame::from_rgba(w, h, &px, self.delay_ms)
+        self.with_pixels(w, h, &px)
+    }
+
+    /// 픽셀만 새것으로 바꾼 프레임 (시간·효과 이름표는 유지)
+    pub fn with_pixels(&self, width: u32, height: u32, rgba: &[u8]) -> Self {
+        Frame { tags: self.tags, ..Frame::from_rgba(width, height, rgba, self.delay_ms) }
+    }
+
+    /// 효과 이름표를 더한 복사본 (픽셀은 함께 쓴다)
+    pub fn tagged(&self, tags: u8) -> Self {
+        Frame { tags: self.tags | tags, ..self.clone() }
     }
 }
 
@@ -130,17 +153,17 @@ mod tests {
     #[test]
     fn packed_size_is_checked_before_unpacking() {
         let frame = Frame::from_rgba(1, 1, &[1, 2, 3, 255], 100);
-        assert_eq!(Frame::from_packed(1, 1, 100, frame.packed().to_vec()).unwrap().rgba(), [1, 2, 3, 255]);
-        assert!(Frame::from_packed(65535, 65535, 100, vec![]).is_none());
-        assert!(Frame::from_packed(1, 1, 100, u32::MAX.to_le_bytes().to_vec()).is_none());
-        assert!(Frame::from_packed(0, 1, 100, lz4_flex::compress_prepend_size(&[])).is_none());
+        assert_eq!(Frame::from_packed(1, 1, 100, 0, frame.packed().to_vec()).unwrap().rgba(), [1, 2, 3, 255]);
+        assert!(Frame::from_packed(65535, 65535, 100, 0, vec![]).is_none());
+        assert!(Frame::from_packed(1, 1, 100, 0, u32::MAX.to_le_bytes().to_vec()).is_none());
+        assert!(Frame::from_packed(0, 1, 100, 0, lz4_flex::compress_prepend_size(&[])).is_none());
     }
 
     #[test]
     fn wide_frame_can_be_created_and_recovered() {
         let px = [1, 2, 3, 255].repeat(65535);
         let frame = Frame::from_rgba(65535, 1, &px, 100);
-        let recovered = Frame::from_packed(65535, 1, 100, frame.packed().to_vec()).unwrap();
+        let recovered = Frame::from_packed(65535, 1, 100, 0, frame.packed().to_vec()).unwrap();
         assert_eq!(recovered.rgba(), px);
     }
 }

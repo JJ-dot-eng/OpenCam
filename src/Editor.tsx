@@ -783,7 +783,7 @@ export default function Editor() {
                 onApply={(rgba, w, h, target) => {
                   setModeRaw(null);
                   exec(() =>
-                    api.applyOverlay(rgba, { sel: target, w, h, x: 0, y: 0, animIn: "none", animOut: "none", inMs: 0, outMs: 0 }),
+                    api.applyOverlay(rgba, { sel: target, w, h, x: 0, y: 0, animIn: "none", animOut: "none", inMs: 0, outMs: 0, draw: true }),
                   );
                 }}
               />
@@ -893,6 +893,11 @@ export default function Editor() {
               size="medium"
               onMove={moveFrames}
               band={band}
+              onPickRange={(a, b) => {
+                // 효과 기록 띠를 누르면 그 구간을 고른다 (같은 구간에 다른 효과를 입히기 쉽게)
+                timelineCtx.selectRange(a, b);
+                timelineCtx.setCurrent(a);
+              }}
               onMenu={(i, x, y) => {
                 if (!sel.includes(i)) selectFrame(i, { ctrlKey: false, shiftKey: false });
                 setMenu({ x, y });

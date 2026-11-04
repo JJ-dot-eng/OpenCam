@@ -643,6 +643,49 @@ input[type="range"] {
   opacity: 0.9;
 }
 
+/* 효과 기록: 효과 종류마다 한 줄, 썸네일 바로 위 (도구를 열지 않아도 보인다) */
+.hist-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 14px;
+  --hist: #6b7280;
+}
+
+.hist-filter { --hist: #0ea5e9; }
+.hist-draw { --hist: #f59e0b; }
+.hist-insert { --hist: #22c55e; }
+.hist-transition { --hist: #a855f7; }
+.hist-zoom { --hist: #ef4444; }
+
+.hist-span {
+  position: absolute;
+  top: 2px;
+  height: 10px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--hist) 70%, transparent);
+  cursor: pointer;
+}
+
+.hist-span:hover {
+  background: var(--hist);
+}
+
+/* 줄 이름은 스크롤해도 왼쪽에 남는다 */
+.hist-label {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  display: inline-block;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--hist);
+  background: color-mix(in srgb, var(--panel) 85%, transparent);
+  border-radius: 0 3px 3px 0;
+  pointer-events: none;
+}
+
 /* 도구 화면의 적용 범위 띠 (썸네일 위 한 줄) */
 .strip-track {
   position: absolute;

@@ -89,6 +89,40 @@ export function runs(indexes: number[]): Span[] {
   return out;
 }
 
+// ---------- 효과 기록 ----------
+
+/** 프레임에 입힌 효과 종류 (Rust `frame::tag`와 같은 비트). key는 CSS 이름에 쓴다 */
+export const EFFECT_TAGS = [
+  { bit: 1, key: "filter", label: "필터" },
+  { bit: 2, key: "draw", label: "그리기" },
+  { bit: 4, key: "insert", label: "텍스트·이미지" },
+  { bit: 8, key: "transition", label: "화면 전환" },
+  { bit: 16, key: "zoom", label: "줌" },
+] as const;
+
+export interface EffectRow {
+  key: string;
+  label: string;
+  /** 이 효과가 입혀진 이어진 구간들 */
+  spans: Span[];
+}
+
+/** 프레임마다 붙은 효과 이름표로 효과 종류마다 한 줄을 만든다. 한 번도 안 쓴 종류는 줄을 만들지 않는다. */
+export function effectRows(tags: number[]): EffectRow[] {
+  const rows: EffectRow[] = [];
+  for (const t of EFFECT_TAGS) {
+    const spans: Span[] = [];
+    for (let i = 0; i < tags.length; i++) {
+      if (!(tags[i] & t.bit)) continue;
+      const last = spans[spans.length - 1];
+      if (last && last.end === i - 1) last.end = i;
+      else spans.push({ start: i, end: i });
+    }
+    if (spans.length) rows.push({ key: t.key, label: t.label, spans });
+  }
+  return rows;
+}
+
 /** 띠 이름 뒤에 붙는 말: "5~20번 · 1.60초" */
 export function spanText(delays: number[], s: Span): string {
   const no = s.start === s.end ? `${s.start + 1}번` : `${s.start + 1}~${s.end + 1}번`;

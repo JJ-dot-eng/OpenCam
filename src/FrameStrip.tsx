@@ -3,10 +3,11 @@
 // 도구 화면이 열려 있으면 썸네일 위에 적용 범위 띠를 그린다. 양 끝을 끌면 범위가, 가운데를 끌면 자리가 바뀐다.
 // Ctrl+휠로 줄이면 프레임 한 장이 칸 하나보다 좁아진다(축소 보기). 그때는 칸마다 그 자리 프레임 하나를 보여 주고,
 // 선택과 지금 프레임은 그 위에 색으로 칠한다.
+// 썸네일 바로 위에는 효과 기록을 효과 종류마다 한 줄씩 그린다(도구를 열지 않아도). 기록 띠를 누르면 그 구간을 고른다.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FrameInfo, frameUrl } from "./api";
-import { Band, BandEdge, dragBand, runs } from "./timeline";
+import { Band, BandEdge, dragBand, effectRows, runs, spanText } from "./timeline";
 
 export type ThumbSize = "small" | "medium" | "large";
 /** 썸네일 칸 크기(px). w는 간격 8px을 뺀 칸 너비. 작게면 한 화면에 보통의 약 1.5배가 들어간다 */
@@ -30,16 +31,20 @@ interface Props {
   onMove: (i: number, to: number) => void;
   /** 열린 도구의 적용 범위 (없으면 띠 줄을 그리지 않는다) */
   band?: Band | null;
+  /** 효과 기록 띠를 눌렀다: 그 구간(처음~끝 프레임 번호) */
+  onPickRange?: (start: number, end: number) => void;
 }
 
 /** 이만큼(px) 움직여야 끌기로 본다. 그냥 누르기와 구분하려고 */
 const DRAG_START = 6;
 /** 범위 띠 줄 높이(px). 썸네일은 그만큼 아래로 내려간다 */
 const TRACK = 24;
+/** 효과 기록 한 줄 높이(px) */
+const ROW = 16;
 /** Ctrl+휠 한 번에 바뀌는 배율 */
 const ZOOM_STEP = 1.25;
 
-export default function FrameStrip({ frames, current, sel, onSelect, threeDigit, size, onMenu, onMove, band }: Props) {
+export default function FrameStrip({ frames, current, sel, onSelect, threeDigit, size, onMenu, onMove, band, onPickRange }: Props) {
   const { w: itemW, h: itemH } = THUMB[size];
   const ITEM = itemW + 8;
   const ref = useRef<HTMLDivElement>(null);
@@ -179,7 +184,11 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
   }, [current]);
 
   const n = frames.length;
-  const top = band ? 6 + TRACK : 6;
+  // 효과 기록: 효과 종류마다 한 줄 (쓴 종류만). 범위 띠 줄 아래, 썸네일 바로 위
+  const delays = useMemo(() => frames.map((f) => f.delayMs), [frames]);
+  const rows = useMemo(() => effectRows(frames.map((f) => f.tags ?? 0)), [frames]);
+  const histTop = band ? 4 + TRACK : 4;
+  const top = histTop + rows.length * ROW + (rows.length ? 4 : 2);
   const items = [];
   const overlays = [];
   if (!compact) {
@@ -267,10 +276,11 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
   const bs = band ? Math.max(0, Math.min(last1, band.start)) : 0;
   const be = band ? Math.max(bs, Math.min(last1, band.end)) : 0;
   const span = (a: number, b: number) => Math.max(compact ? 2 : 0, (b - a + 1) * unit - gap);
+  const seenSpan = (a: number, b: number) => (b + 1) * unit >= view.left - 50 && a * unit <= view.left + view.width + 50;
 
   return (
     <div className="strip-wrap">
-      <div className="strip" ref={ref} style={{ height: itemH + 16 + (band ? TRACK : 0) }}>
+      <div className="strip" ref={ref} style={{ height: itemH + 10 + top }}>
         <div className="strip-inner" style={{ width: n * unit }}>
           {band && (
             <div className="strip-track">
@@ -297,6 +307,23 @@ export default function FrameStrip({ frames, current, sel, onSelect, threeDigit,
               </div>
             </div>
           )}
+          {rows.map((r, k) => (
+            <div key={r.key} className={`hist-row hist-${r.key}`} style={{ top: histTop + k * ROW }}>
+              <span className="hist-label">{r.label}</span>
+              {r.spans
+                .filter((x) => seenSpan(x.start, x.end))
+                .map((x) => (
+                  <div
+                    key={x.start}
+                    className="hist-span"
+                    style={{ left: x.start * unit, width: Math.max(3, span(x.start, x.end)) }}
+                    title={`${r.label} · ${spanText(delays, x)} (누르면 이 구간을 고릅니다)`}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => onPickRange?.(x.start, x.end)}
+                  />
+                ))}
+            </div>
+          ))}
           {items}
           {overlays}
           {dropAt !== null && <div className="strip-drop" style={{ left: dropAt * unit - (compact ? 1 : 5), top: top - 2 }} />}

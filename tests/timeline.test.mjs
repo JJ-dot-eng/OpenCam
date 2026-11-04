@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bounds, dragBand, framesBackMs, framesForMs, runs, spanMs, spanText } from "../src/timeline.ts";
+import { bounds, dragBand, effectRows, framesBackMs, framesForMs, runs, spanMs, spanText } from "../src/timeline.ts";
 
 const delays = [100, 100, 200, 50, 50, 500];
 
@@ -65,4 +65,17 @@ test("bounds finds the first and last frame in one pass, even for huge selection
   assert.deepEqual(bounds([7, 2, 9, 4]), { start: 2, end: 9 });
   const huge = Array.from({ length: 300_000 }, (_, i) => i + 5);
   assert.deepEqual(bounds(huge), { start: 5, end: 300_004 });
+});
+
+test("effectRows makes one row per used effect with its continuous spans", () => {
+  assert.deepEqual(effectRows([0, 0, 0]), []);
+  // 필터(1)는 1~2번, 줌(16)은 2번과 4번, 그리기·텍스트·전환은 안 씀
+  const rows = effectRows([0, 1, 17, 0, 16]);
+  assert.deepEqual(
+    rows.map((r) => [r.key, r.spans]),
+    [
+      ["filter", [{ start: 1, end: 2 }]],
+      ["zoom", [{ start: 2, end: 2 }, { start: 4, end: 4 }]],
+    ],
+  );
 });

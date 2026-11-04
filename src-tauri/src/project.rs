@@ -1,7 +1,7 @@
 //! 편집 중인 프레임 목록과 편집 명령, 되돌리기.
 
 use crate::effects::{self, Filter, Overlay, TransitionKind, ZoomFx};
-use crate::frame::Frame;
+use crate::frame::{tag, Frame};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,8 @@ pub struct FrameInfo {
     pub width: u32,
     pub height: u32,
     pub delay_ms: u32,
+    /// 입힌 효과 종류 (`frame::tag`)
+    pub tags: u8,
 }
 
 #[derive(Default)]
@@ -86,7 +88,7 @@ impl Project {
     pub fn infos(&self) -> Vec<FrameInfo> {
         self.frames
             .iter()
-            .map(|f| FrameInfo { id: f.id, width: f.width, height: f.height, delay_ms: f.delay_ms })
+            .map(|f| FrameInfo { id: f.id, width: f.width, height: f.height, delay_ms: f.delay_ms, tags: f.tags })
             .collect()
     }
 
@@ -243,7 +245,9 @@ impl Project {
         // 합은 u64로 센다 (600초 프레임 7200장이면 u32를 넘는다).
         // 한 프레임 시간은 u32(ms)라서 그보다 길면(약 49.7일) 가장 긴 값으로 둔다
         let total: u64 = s.iter().map(|&i| u64::from(self.frames[i].delay_ms)).sum();
-        self.frames[s[0]] = self.frames[s[0]].with_delay(u32::try_from(total).unwrap_or(u32::MAX));
+        // 합친 프레임은 합쳐진 프레임들에 입힌 효과 이름표를 모두 가진다
+        let tags = s.iter().fold(0, |t, &i| t | self.frames[i].tags);
+        self.frames[s[0]] = self.frames[s[0]].with_delay(u32::try_from(total).unwrap_or(u32::MAX)).tagged(tags);
         for &i in s[1..].iter().rev() {
             self.frames.remove(i);
         }
@@ -394,21 +398,26 @@ impl Project {
         }
         let mut out: Vec<Frame> = Vec::with_capacity(self.frames.len() - drop.len());
         let mut carry = 0u64; // 앞에 남길 프레임이 없을 때 첫 프레임에 넘길 시간
+        let mut carry_tags = 0u8; // 그때 같이 넘길 효과 이름표
         for (i, f) in self.frames.iter().enumerate() {
             if gone[i] {
                 if keep_speed {
+                    // 시간을 물려받는 프레임은 효과 이름표도 물려받는다 (그 시간에 효과가 있었으므로)
                     match out.last_mut() {
                         Some(prev) => {
                             let total = u64::from(prev.delay_ms) + u64::from(f.delay_ms);
-                            *prev = prev.with_delay(u32::try_from(total).unwrap_or(u32::MAX));
+                            *prev = prev.with_delay(u32::try_from(total).unwrap_or(u32::MAX)).tagged(f.tags);
                         }
-                        None => carry += u64::from(f.delay_ms),
+                        None => {
+                            carry += u64::from(f.delay_ms);
+                            carry_tags |= f.tags;
+                        }
                     }
                 }
             } else {
                 out.push(if carry > 0 {
                     let total = u64::from(f.delay_ms) + std::mem::take(&mut carry);
-                    f.with_delay(u32::try_from(total).unwrap_or(u32::MAX))
+                    f.with_delay(u32::try_from(total).unwrap_or(u32::MAX)).tagged(std::mem::take(&mut carry_tags))
                 } else {
                     f.clone()
                 });
@@ -447,9 +456,9 @@ impl Project {
         }
     }
 
-    /// 고른 프레임들의 픽셀을 제자리에서 바꾼다.
+    /// 고른 프레임들의 픽셀을 제자리에서 바꾸고 효과 이름표(tag)를 붙인다.
     /// f(픽셀, 가로, 세로, 구간 안에서 이 프레임 가운데 시각 ms, 구간 전체 시간 ms)
-    fn map_timed(&mut self, idx: &[usize], f: impl Fn(&mut [u8], u32, u32, f32, f32) + Sync) {
+    fn map_timed(&mut self, idx: &[usize], tag: u8, f: impl Fn(&mut [u8], u32, u32, f32, f32) + Sync) {
         if idx.is_empty() {
             return;
         }
@@ -466,10 +475,12 @@ impl Project {
             .par_iter()
             .zip(mids.par_iter())
             .map(|(&i, &tm)| {
-                self.frames[i].map_pixels(|w, h, mut px| {
-                    f(&mut px, w, h, tm, total);
-                    (w, h, px)
-                })
+                self.frames[i]
+                    .map_pixels(|w, h, mut px| {
+                        f(&mut px, w, h, tm, total);
+                        (w, h, px)
+                    })
+                    .tagged(tag)
             })
             .collect();
         for (&i, fr) in idx.iter().zip(changed) {
@@ -485,7 +496,7 @@ impl Project {
             return;
         }
         let idx = self.sel_or_all(sel);
-        self.map_timed(&idx, |px, w, h, _, _| {
+        self.map_timed(&idx, tag::FILTER, |px, w, h, _, _| {
             for f in filters {
                 effects::apply_filter(px, w, h, f);
             }
@@ -500,7 +511,7 @@ impl Project {
                     if let Some(p) = &prev {
                         crate::filters::afterimage(&mut px, p, strength);
                     }
-                    self.frames[i] = Frame::from_rgba(fr.width, fr.height, &px, fr.delay_ms);
+                    self.frames[i] = fr.with_pixels(fr.width, fr.height, &px);
                     prev = Some(px);
                 }
             }
@@ -512,7 +523,7 @@ impl Project {
         let idx = self.span(sel);
         let Some(&first) = idx.first() else { return };
         let first_px = self.frames[first].rgba();
-        self.map_timed(&idx, |px, _, _, tm, total| {
+        self.map_timed(&idx, tag::TRANSITION, |px, _, _, tm, total| {
             effects::apply_transition(px, kind, tm, total, ms as f32, &first_px);
         });
     }
@@ -529,7 +540,7 @@ impl Project {
             t += u64::from(self.frames[i].delay_ms);
         }
         let limit = z.total_ms as f32;
-        self.map_timed(&idx, |px, w, h, tm, total| {
+        self.map_timed(&idx, tag::ZOOM, |px, w, h, tm, total| {
             // 녹화가 효과보다 짧으면 남은 길이에 맞춘다
             let p = z.progress(tm, total.min(limit));
             effects::draw_zoom(px, w, h, z, p);
@@ -603,13 +614,24 @@ impl Project {
             return;
         }
         self.checkpoint();
-        self.frames = plan.iter().map(|&(i, d)| self.frames[i].with_delay(d)).collect();
+        // 남은 프레임은 시간을 이어받은 (지운) 프레임들의 효과 이름표도 이어받는다
+        let n = self.frames.len();
+        self.frames = plan
+            .iter()
+            .enumerate()
+            .map(|(k, &(i, d))| {
+                let next = plan.get(k + 1).map_or(n, |p| p.0);
+                let tags = self.frames[i..next].iter().fold(0, |t, f| t | f.tags);
+                self.frames[i].with_delay(d).tagged(tags)
+            })
+            .collect();
     }
 
     /// 그림·텍스트·이미지 여러 개를 선택 구간(없으면 전체)에 순서대로(뒤의 것이 위에) 덧씌운다. 되돌리기는 한 번.
-    pub fn overlays(&mut self, sel: &[usize], ovs: &[Overlay]) {
+    /// tag는 효과 기록에 남길 종류 (그리기 `tag::DRAW`, 텍스트·이미지 `tag::INSERT`)
+    pub fn overlays(&mut self, sel: &[usize], ovs: &[Overlay], tag: u8) {
         let idx = self.span(sel);
-        self.map_timed(&idx, |px, w, h, tm, total| {
+        self.map_timed(&idx, tag, |px, w, h, tm, total| {
             for ov in ovs {
                 ov.draw(px, w, h, tm, total);
             }
@@ -1035,6 +1057,59 @@ mod tests {
         assert_eq!(p.append(vec![]), None);
         assert_eq!(order(&p), vec![1, 2]);
         assert!(p.can_redo());
+    }
+
+    #[test]
+    fn effect_tags_follow_frames() {
+        let mut p = Project { undo_enabled: true, ..Default::default() };
+        p.load((0..6).map(|i| solid(2, 2, i * 10, 10)).collect());
+        let tags = |p: &Project| p.frames.iter().map(|f| f.tags).collect::<Vec<_>>();
+        // 효과를 입힌 프레임에만 그 종류 이름표가 붙는다
+        p.apply_filters(&[1, 2], &[Filter::Invert]);
+        let dot = Overlay {
+            rgba: vec![255; 4],
+            w: 1,
+            h: 1,
+            x: 0.0,
+            y: 0.0,
+            anim_in: Default::default(),
+            anim_out: Default::default(),
+            in_ms: 0.0,
+            out_ms: 0.0,
+        };
+        p.overlays(&[2, 4], &[dot], tag::INSERT);
+        let (f, i) = (tag::FILTER, tag::INSERT);
+        assert_eq!(tags(&p), vec![0, f, f | i, i, i, 0]);
+        // 옮기고 지워도 이름표는 프레임과 같이 다니고, 되돌리면 같이 되돌아간다
+        p.move_to(&[1], 6);
+        assert_eq!(tags(&p), vec![0, f | i, i, i, 0, f]);
+        p.delete(&[0]);
+        assert_eq!(tags(&p), vec![f | i, i, i, 0, f]);
+        assert!(p.undo() && p.undo());
+        assert_eq!(tags(&p), vec![0, f, f | i, i, i, 0]);
+        // 합치면 합쳐진 프레임들의 이름표를 모두 가진다
+        p.merge(&[0, 1]);
+        assert_eq!(tags(&p), vec![f, f | i, i, i, 0]);
+        assert!(p.undo());
+        // 속도를 지키며 지우면 시간을 이어받는 앞 프레임이 이름표도 이어받는다
+        p.reduce(&[], ReduceMode::Even, 2, true);
+        assert_eq!(tags(&p), vec![f, f | i, i]);
+        assert!(p.undo());
+        // 줌·화면 전환도 남는다
+        let z = ZoomFx {
+            region: effects::Region { x: 0, y: 0, w: 1, h: 1, ellipse: false },
+            scale: effects::ZoomScale::Full,
+            to_center: true,
+            shadow: false,
+            spread: 0.0,
+            total_ms: 10,
+            intro_ms: 0,
+            outro_ms: 0,
+        };
+        p.zoom_fx(5, &z);
+        p.transition(&[0, 1], TransitionKind::Flash, 10);
+        assert_eq!(tags(&p)[5], tag::ZOOM);
+        assert_eq!(tags(&p)[0], tag::TRANSITION);
     }
 
     #[test]

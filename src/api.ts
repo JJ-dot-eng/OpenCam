@@ -126,6 +126,8 @@ export interface FrameInfo {
   width: number;
   height: number;
   delayMs: number;
+  /** 입힌 효과 종류 (비트마다 한 종류, timeline.ts의 EFFECT_TAGS) */
+  tags: number;
 }
 
 /** 비정상 종료로 남은 작업 */
@@ -330,6 +332,8 @@ export interface OverlayMeta {
   animOut: Anim;
   inMs: number;
   outMs: number;
+  /** 그리기 화면에서 온 것 (효과 기록에 "그리기"로 남긴다) */
+  draw?: boolean;
 }
 
 export type EditOp =
